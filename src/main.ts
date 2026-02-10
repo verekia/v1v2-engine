@@ -1,6 +1,6 @@
 import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER } from './ecs.ts'
 import { m4FromTRS, m4LookAt, m4Perspective } from './math.ts'
-import { cubeVertices, cubeIndices, createSphereGeometry } from './geometry.ts'
+import { cubeVertices, cubeIndices, createSphereGeometry, mergeGeometries } from './geometry.ts'
 import { initGPU, Renderer } from './renderer.ts'
 import { InputManager } from './input.ts'
 import { OrbitControls } from './orbit-controls.ts'
@@ -10,7 +10,38 @@ const MOVE_SPEED = 3
 const CUBE_GEO_ID = 0
 const SPHERE_GEO_ID = 1
 const MEGAXE_GEO_ID = 2
+const EDEN_GEO_START = 3
 const UP = new Float32Array([0, 1, 0])
+
+const EDEN_COLORS: Record<string, [number, number, number]> = {
+  Eden_1: [0.78, 0.44, 0.25],
+  Eden_2: [0.85, 0.68, 0.30],
+  Eden_3: [0.75, 0.75, 0.75],
+  Eden_4: [0.78, 0.30, 0.20],
+  Eden_5: [0.25, 0.55, 0.20],
+  Eden_6: [0.30, 0.36, 0.30],
+  Eden_7: [0.75, 0.75, 0.75],
+  Eden_8: [0.15, 0.15, 0.18],
+  Eden_9: [0.00, 0.75, 0.70],
+  Eden_10: [0.55, 0.50, 0.42],
+  Eden_11: [0.85, 0.35, 0.55],
+  Eden_12: [0.95, 0.95, 0.95],
+  Eden_13: [0.80, 0.65, 0.15],
+  Eden_14: [0.65, 0.65, 0.62],
+  Eden_15: [0.30, 0.65, 0.20],
+  Eden_16: [0.50, 0.32, 0.15],
+  Eden_17: [0.50, 0.25, 0.65],
+  Eden_18: [0.90, 0.80, 0.20],
+  Eden_19: [0.15, 0.15, 0.18],
+  Eden_20: [0.75, 0.75, 0.75],
+  Eden_21: [0.95, 0.95, 0.95],
+  Eden_22: [0.60, 0.40, 0.22],
+  Eden_23: [0.60, 0.40, 0.22],
+  Eden_24: [0.00, 0.75, 0.70],
+  Eden_25: [0.90, 0.80, 0.20],
+  Eden_26: [0.85, 0.35, 0.55],
+  Eden_27: [0.30, 0.36, 0.30],
+}
 
 export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Init ──────────────────────────────────────────────────────────
@@ -52,21 +83,20 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     world.addMeshInstance(axe, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
   }
 
-  // ── Megaxe grid (behind spheres) ──────────────────────────────────
-  if (megaxe) {
-    const GRID_COLS = 100
-    const GRID_ROWS = 50
-    const GRID_SPACING = 3
-    const GRID_Z = -20
-    for (let row = 0; row < GRID_ROWS; row++) {
-      for (let col = 0; col < GRID_COLS; col++) {
-        const e = world.createEntity()
-        const x = (col - (GRID_COLS - 1) / 2) * GRID_SPACING
-        const y = (row - (GRID_ROWS - 1) / 2) * GRID_SPACING
-        world.addTransform(e, { position: [x, y, GRID_Z], scale: megaxe.scale })
-        world.addMeshInstance(e, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
-      }
-    }
+  // ── Eden entity (merged into 1 draw call) ──────────────────────
+  const edenMeshes = glbMeshes.filter(m => m.name.startsWith('Eden_'))
+  if (edenMeshes.length > 0) {
+    const merged = mergeGeometries(
+      edenMeshes.map(em => ({
+        vertices: em.vertices,
+        indices: em.indices,
+        color: EDEN_COLORS[em.name] ?? [1, 1, 1],
+      })),
+    )
+    renderer.registerGeometry(EDEN_GEO_START, merged.vertices, merged.indices)
+    const eden = world.createEntity()
+    world.addTransform(eden, { position: [-30, 0, 0], scale: edenMeshes[0]!.scale })
+    world.addMeshInstance(eden, { geometryId: EDEN_GEO_START, color: [1, 1, 1] })
   }
 
   // ── Sphere entities (behind the cube, negative Z) ─────────────────
@@ -89,7 +119,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Lighting ──────────────────────────────────────────────────────
   world.setDirectionalLight([-1, -1, -1], [1, 1, 1])
-  world.setAmbientLight([0.15, 0.15, 0.15])
+  world.setAmbientLight([0.4, 0.4, 0.4])
 
   // ── Stats overlay ────────────────────────────────────────────────
   const stats = document.createElement('div')

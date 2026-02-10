@@ -101,3 +101,46 @@ export function createSphereGeometry(
 
   return { vertices, indices }
 }
+
+// ── Merge primitives ────────────────────────────────────────────────
+
+export function mergeGeometries(
+  primitives: {
+    vertices: Float32Array
+    indices: Uint16Array | Uint32Array
+    color: [number, number, number]
+  }[],
+): { vertices: Float32Array; indices: Uint32Array } {
+  let totalVerts = 0
+  let totalIdxs = 0
+  for (const p of primitives) {
+    totalVerts += p.vertices.length / 9
+    totalIdxs += p.indices.length
+  }
+  const vertices = new Float32Array(totalVerts * 9)
+  const indices = new Uint32Array(totalIdxs)
+  let vertOff = 0
+  let idxOff = 0
+  for (const p of primitives) {
+    const vCount = p.vertices.length / 9
+    for (let v = 0; v < vCount; v++) {
+      const src = v * 9
+      const dst = (vertOff + v) * 9
+      vertices[dst]! = p.vertices[src]!
+      vertices[dst + 1]! = p.vertices[src + 1]!
+      vertices[dst + 2]! = p.vertices[src + 2]!
+      vertices[dst + 3]! = p.vertices[src + 3]!
+      vertices[dst + 4]! = p.vertices[src + 4]!
+      vertices[dst + 5]! = p.vertices[src + 5]!
+      vertices[dst + 6]! = p.color[0]
+      vertices[dst + 7]! = p.color[1]
+      vertices[dst + 8]! = p.color[2]
+    }
+    for (let j = 0; j < p.indices.length; j++) {
+      indices[idxOff + j] = p.indices[j]! + vertOff
+    }
+    vertOff += vCount
+    idxOff += p.indices.length
+  }
+  return { vertices, indices }
+}

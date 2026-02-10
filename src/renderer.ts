@@ -175,11 +175,14 @@ export class Renderer {
     })
     this.device.queue.writeBuffer(vertexBuffer, 0, vertices.buffer as ArrayBuffer, vertices.byteOffset, vertices.byteLength)
 
+    const indexByteSize = (indices.byteLength + 3) & ~3 // align to 4 bytes
     const indexBuffer = this.device.createBuffer({
-      size: indices.byteLength,
+      size: indexByteSize,
       usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     })
-    this.device.queue.writeBuffer(indexBuffer, 0, indices.buffer as ArrayBuffer, indices.byteOffset, indices.byteLength)
+    const indexCopy = new Uint8Array(indexByteSize)
+    indexCopy.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength))
+    this.device.queue.writeBuffer(indexBuffer, 0, indexCopy.buffer as ArrayBuffer, 0, indexByteSize)
 
     // Compute bounding sphere radius from vertex positions (stride = 9 floats)
     let maxR2 = 0

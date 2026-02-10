@@ -110,7 +110,10 @@ export async function loadGlb(
     // Process mesh
     if (node.mesh !== undefined) {
       const mesh = gltf.meshes[node.mesh]
-      for (const primitive of mesh.primitives) {
+      const baseName = mesh.name ?? `mesh_${node.mesh}`
+      const prims = mesh.primitives
+      for (let pi = 0; pi < prims.length; pi++) {
+        const primitive = prims[pi]
         const result = decodePrimitive(primitive, gltf, bin, draco, materialColors)
         if (!result) continue
 
@@ -124,8 +127,9 @@ export async function loadGlb(
           }
         }
 
+        const name = prims.length > 1 ? `${baseName}_${pi + 1}` : baseName
         meshes.push({
-          name: mesh.name ?? `mesh_${node.mesh}`,
+          name,
           vertices: result.vertices,
           indices: result.indices,
           position,
