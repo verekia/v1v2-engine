@@ -1,4 +1,3 @@
-import { TRANSFORM, MESH_INSTANCE, SKINNED, type World } from './ecs.ts'
 import { m4Multiply, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
 import { lambertShader, skinnedLambertShader } from './shaders.ts'
 import type { SkinInstance } from './skin.ts'
@@ -7,6 +6,26 @@ const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
 const MAX_SKINNED_ENTITIES = 64
+
+export interface RenderScene {
+  cameraView: Float32Array
+  cameraViewOffset: number
+  cameraProj: Float32Array
+  cameraProjOffset: number
+  lightDirection: Float32Array
+  lightDirColor: Float32Array
+  lightAmbientColor: Float32Array
+  entityCount: number
+  renderMask: Uint8Array
+  skinnedMask: Uint8Array
+  positions: Float32Array
+  scales: Float32Array
+  worldMatrices: Float32Array
+  colors: Float32Array
+  geometryIds: Uint8Array
+  skinInstanceIds: Int16Array
+  skinInstances: SkinInstance[]
+}
 
 interface GeometryGPU {
   vertexBuffer: GPUBuffer
@@ -18,16 +37,6 @@ interface GeometryGPU {
 
 interface SkinnedGeometryGPU extends GeometryGPU {
   skinBuffer: GPUBuffer
-}
-
-export async function initGPU(canvas: HTMLCanvasElement) {
-  const adapter = await navigator.gpu.requestAdapter()
-  if (!adapter) throw new Error('No WebGPU adapter')
-  const device = await adapter.requestDevice()
-  const context = canvas.getContext('webgpu')!
-  const format = navigator.gpu.getPreferredCanvasFormat()
-  context.configure({ device, format, alphaMode: 'premultiplied' })
-  return { device, context, format }
 }
 
 export class Renderer {
@@ -333,54 +342,51 @@ export class Renderer {
     })
   }
 
-  render(world: World, skinInstances?: SkinInstance[]): void {
+  render(scene: RenderScene): void {
     const device = this.device
-    const cam = world.activeCamera
-    if (cam < 0) return
 
     // Upload camera (view + proj = 128 bytes)
-    device.queue.writeBuffer(this.cameraBuffer, 0, world.viewMatrices, cam * 16, 16)
-    device.queue.writeBuffer(this.cameraBuffer, 64, world.projMatrices, cam * 16, 16)
+    device.queue.writeBuffer(this.cameraBuffer, 0, scene.cameraView.buffer as ArrayBuffer, scene.cameraView.byteOffset + scene.cameraViewOffset * 4, 64)
+    device.queue.writeBuffer(this.cameraBuffer, 64, scene.cameraProj.buffer as ArrayBuffer, scene.cameraProj.byteOffset + scene.cameraProjOffset * 4, 64)
 
     // Upload lighting (direction: vec4, dirColor: vec4, ambient: vec4 = 48 bytes)
     const lightData = new Float32Array(12)
-    lightData.set(world.directionalLightDir, 0)   // vec4 slot 0 (w=0)
-    lightData.set(world.directionalLightColor, 4)  // vec4 slot 1 (w=0)
-    lightData.set(world.ambientLightColor, 8)      // vec4 slot 2 (w=0)
+    lightData.set(scene.lightDirection, 0)   // vec4 slot 0 (w=0)
+    lightData.set(scene.lightDirColor, 4)    // vec4 slot 1 (w=0)
+    lightData.set(scene.lightAmbientColor, 8) // vec4 slot 2 (w=0)
     device.queue.writeBuffer(this.lightingBuffer, 0, lightData)
 
     // ── Frustum culling setup ───────────────────────────────────────────
     // VP = projection * view
-    m4Multiply(this.vpMat, 0, world.projMatrices, cam * 16, world.viewMatrices, cam * 16)
+    m4Multiply(this.vpMat, 0, scene.cameraProj, scene.cameraProjOffset, scene.cameraView, scene.cameraViewOffset)
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
     // Upload per-entity model data (only visible entities)
-    const meshMask = TRANSFORM | MESH_INSTANCE
     const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
-    for (let i = 0; i < world.entityCount; i++) {
-      if ((world.componentMask[i]! & meshMask) !== meshMask) continue
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
 
       // Frustum cull: bounding sphere in world space
-      const isSkinned = !!(world.componentMask[i]! & SKINNED)
+      const isSkinned = !!scene.skinnedMask[i]
       const geo = isSkinned
-        ? this.skinnedGeometries.get(world.geometryIds[i]!)
-        : this.geometries.get(world.geometryIds[i]!)
+        ? this.skinnedGeometries.get(scene.geometryIds[i]!)
+        : this.geometries.get(scene.geometryIds[i]!)
       if (!geo) continue
       const si = i * 3
-      const sx = Math.abs(world.scales[si]!)
-      const sy = Math.abs(world.scales[si + 1]!)
-      const sz = Math.abs(world.scales[si + 2]!)
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
       const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
       const r = geo.boundingRadius * maxScale
-      if (!frustumContainsSphere(planes, world.positions[si]!, world.positions[si + 1]!, world.positions[si + 2]!, r)) continue
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
 
       // worldMatrix (16 floats = 64 bytes)
-      for (let j = 0; j < 16; j++) modelSlot[j] = world.worldMatrices[i * 16 + j]!
+      for (let j = 0; j < 16; j++) modelSlot[j] = scene.worldMatrices[i * 16 + j]!
       // color (3 floats → vec4f at offset 16)
-      modelSlot[16] = world.colors[i * 3]!
-      modelSlot[17] = world.colors[i * 3 + 1]!
-      modelSlot[18] = world.colors[i * 3 + 2]!
+      modelSlot[16] = scene.colors[i * 3]!
+      modelSlot[17] = scene.colors[i * 3 + 1]!
+      modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = 1.0
       device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 20)
     }
@@ -388,24 +394,22 @@ export class Renderer {
     // Upload joint matrices for skinned entities
     let skinnedSlot = 0
     const skinnedSlotMap = new Map<number, number>() // entity → slot
-    if (skinInstances) {
-      for (let i = 0; i < world.entityCount; i++) {
-        if (!(world.componentMask[i]! & SKINNED)) continue
-        const instId = world.skinInstanceIds[i]!
-        if (instId < 0) continue
-        const inst = skinInstances[instId]
-        if (!inst) continue
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.skinnedMask[i]) continue
+      const instId = scene.skinInstanceIds[i]!
+      if (instId < 0) continue
+      const inst = scene.skinInstances[instId]
+      if (!inst) continue
 
-        skinnedSlotMap.set(i, skinnedSlot)
-        device.queue.writeBuffer(
-          this.jointBuffer,
-          skinnedSlot * JOINT_SLOT_SIZE,
-          inst.jointMatrices.buffer as ArrayBuffer,
-          inst.jointMatrices.byteOffset,
-          inst.jointMatrices.byteLength,
-        )
-        skinnedSlot++
-      }
+      skinnedSlotMap.set(i, skinnedSlot)
+      device.queue.writeBuffer(
+        this.jointBuffer,
+        skinnedSlot * JOINT_SLOT_SIZE,
+        inst.jointMatrices.buffer as ArrayBuffer,
+        inst.jointMatrices.byteOffset,
+        inst.jointMatrices.byteLength,
+      )
+      skinnedSlot++
     }
 
     // ── Render pass ───────────────────────────────────────────────────
@@ -434,20 +438,20 @@ export class Renderer {
     pass.setBindGroup(0, this.cameraBG)
     pass.setBindGroup(2, this.lightingBG)
 
-    for (let i = 0; i < world.entityCount; i++) {
-      if ((world.componentMask[i]! & meshMask) !== meshMask) continue
-      if (world.componentMask[i]! & SKINNED) continue // skip skinned in static pass
-      const geo = this.geometries.get(world.geometryIds[i]!)
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
+      if (scene.skinnedMask[i]) continue // skip skinned in static pass
+      const geo = this.geometries.get(scene.geometryIds[i]!)
       if (!geo) continue
 
       // Frustum cull (same test as above)
       const si = i * 3
-      const sx = Math.abs(world.scales[si]!)
-      const sy = Math.abs(world.scales[si + 1]!)
-      const sz = Math.abs(world.scales[si + 2]!)
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
       const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
       const r = geo.boundingRadius * maxScale
-      if (!frustumContainsSphere(planes, world.positions[si]!, world.positions[si + 1]!, world.positions[si + 2]!, r)) continue
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
 
       pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
       pass.setVertexBuffer(0, geo.vertexBuffer)
@@ -462,21 +466,21 @@ export class Renderer {
       pass.setBindGroup(0, this.cameraBG)
       pass.setBindGroup(2, this.lightingBG)
 
-      for (let i = 0; i < world.entityCount; i++) {
-        if ((world.componentMask[i]! & (meshMask | SKINNED)) !== (meshMask | SKINNED)) continue
-        const geo = this.skinnedGeometries.get(world.geometryIds[i]!)
+      for (let i = 0; i < scene.entityCount; i++) {
+        if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+        const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
         if (!geo) continue
         const slot = skinnedSlotMap.get(i)
         if (slot === undefined) continue
 
         // Frustum cull
         const si = i * 3
-        const sx = Math.abs(world.scales[si]!)
-        const sy = Math.abs(world.scales[si + 1]!)
-        const sz = Math.abs(world.scales[si + 2]!)
+        const sx = Math.abs(scene.scales[si]!)
+        const sy = Math.abs(scene.scales[si + 1]!)
+        const sz = Math.abs(scene.scales[si + 2]!)
         const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
         const r = geo.boundingRadius * maxScale
-        if (!frustumContainsSphere(planes, world.positions[si]!, world.positions[si + 1]!, world.positions[si + 2]!, r)) continue
+        if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
 
         pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
         pass.setBindGroup(3, this.jointBG, [slot * JOINT_SLOT_SIZE])

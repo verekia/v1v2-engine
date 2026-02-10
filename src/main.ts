@@ -1,11 +1,12 @@
-import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER } from './ecs.ts'
-import { m4FromTRS, m4LookAt, m4Perspective } from './math.ts'
-import { cubeVertices, cubeIndices, createSphereGeometry, mergeGeometries } from './geometry.ts'
-import { initGPU, Renderer } from './renderer.ts'
-import { InputManager } from './input.ts'
-import { OrbitControls } from './orbit-controls.ts'
-import { loadGlb } from './gltf.ts'
-import { createSkeleton, createSkinInstance, updateSkinInstance, type SkinInstance } from './skin.ts'
+import {
+  initGPU, Renderer, OrbitControls, loadGlb,
+  createSkeleton, createSkinInstance, updateSkinInstance,
+  createSphereGeometry, mergeGeometries,
+  m4FromTRS, m4LookAt, m4Perspective,
+} from './engine/index.ts'
+import type { RenderScene, SkinInstance } from './engine/index.ts'
+import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER, SKINNED } from './ecs/index.ts'
+import { InputManager } from './ecs/index.ts'
 
 const MOVE_SPEED = 3
 const SPHERE_GEO_ID = 1
@@ -185,6 +186,12 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   })
   resizeObserver.observe(canvas)
 
+  // ── Pre-allocate render masks ─────────────────────────────────────
+  const MAX_ENTITIES = 10_000
+  const renderMask = new Uint8Array(MAX_ENTITIES)
+  const skinnedMask = new Uint8Array(MAX_ENTITIES)
+  const meshMask = TRANSFORM | MESH_INSTANCE
+
   // ── Game loop ─────────────────────────────────────────────────────
   let lastTime = performance.now()
 
@@ -238,8 +245,35 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       )
     }
 
+    // ── Build render masks ──────────────────────────────────────────
+    for (let i = 0; i < world.entityCount; i++) {
+      const mask = world.componentMask[i]!
+      renderMask[i] = (mask & meshMask) === meshMask ? 1 : 0
+      skinnedMask[i] = mask & SKINNED ? 1 : 0
+    }
+
     // ── Render ────────────────────────────────────────────────────
-    renderer.render(world, skinInstances)
+    const c = world.activeCamera
+    const scene: RenderScene = {
+      cameraView: world.viewMatrices,
+      cameraViewOffset: c * 16,
+      cameraProj: world.projMatrices,
+      cameraProjOffset: c * 16,
+      lightDirection: world.directionalLightDir,
+      lightDirColor: world.directionalLightColor,
+      lightAmbientColor: world.ambientLightColor,
+      entityCount: world.entityCount,
+      renderMask,
+      skinnedMask,
+      positions: world.positions,
+      scales: world.scales,
+      worldMatrices: world.worldMatrices,
+      colors: world.colors,
+      geometryIds: world.geometryIds,
+      skinInstanceIds: world.skinInstanceIds,
+      skinInstances,
+    }
+    renderer.render(scene)
     frames++
 
     requestAnimationFrame(loop)
