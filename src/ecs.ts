@@ -5,6 +5,7 @@ export const TRANSFORM = 1 << 0
 export const MESH_INSTANCE = 1 << 1
 export const CAMERA = 1 << 2
 export const INPUT_RECEIVER = 1 << 3
+export const SKINNED = 1 << 4
 
 export class World {
   entityCount = 0
@@ -19,6 +20,9 @@ export class World {
   // MeshInstance
   geometryIds = new Uint8Array(MAX_ENTITIES)
   colors = new Float32Array(MAX_ENTITIES * 3)
+
+  // Skinned
+  skinInstanceIds = new Int16Array(MAX_ENTITIES).fill(-1)
 
   // Camera
   fovs = new Float32Array(MAX_ENTITIES)
@@ -66,6 +70,11 @@ export class World {
 
   addInputReceiver(e: number): void {
     this.componentMask[e]! |= INPUT_RECEIVER
+  }
+
+  addSkinned(e: number, skinInstanceId: number): void {
+    this.componentMask[e]! |= SKINNED
+    this.skinInstanceIds[e] = skinInstanceId
   }
 
   setDirectionalLight(dir: [number, number, number], color: [number, number, number]): void {

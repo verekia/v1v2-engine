@@ -5,12 +5,13 @@ import { initGPU, Renderer } from './renderer.ts'
 import { InputManager } from './input.ts'
 import { OrbitControls } from './orbit-controls.ts'
 import { loadGlb } from './gltf.ts'
+import { createSkeleton, createSkinInstance, updateSkinInstance, type SkinInstance } from './skin.ts'
 
 const MOVE_SPEED = 3
-const CUBE_GEO_ID = 0
 const SPHERE_GEO_ID = 1
 const MEGAXE_GEO_ID = 2
 const EDEN_GEO_START = 3
+const PLAYER_BODY_GEO_ID = 4
 const UP = new Float32Array([0, 1, 0])
 
 const EDEN_COLORS: Record<string, [number, number, number]> = {
@@ -51,8 +52,6 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const renderer = new Renderer(device, context, format, canvas, 10000)
   const orbit = new OrbitControls(canvas)
 
-  renderer.registerGeometry(CUBE_GEO_ID, cubeVertices, cubeIndices)
-
   const sphere = createSphereGeometry(16, 24)
   renderer.registerGeometry(SPHERE_GEO_ID, sphere.vertices, sphere.indices)
 
@@ -62,19 +61,13 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 500 })
   world.activeCamera = cam
 
-  // ── Cube entity ───────────────────────────────────────────────────
-  const cube = world.createEntity()
-  world.addTransform(cube, { position: [0, 0, 0], scale: [1, 1, 1] })
-  world.addMeshInstance(cube, { geometryId: CUBE_GEO_ID, color: [0.8, 0.2, 0.2] })
-  world.addInputReceiver(cube)
-
-  // ── Megaxe entity ────────────────────────────────────────────────
+  // ── Load static GLB (megaxe + Eden) ───────────────────────────────
   const megaxeColors = new Map<number, [number, number, number]>([
     [0, [1, 1, 1]],       // material 0 → white
     [1, [0, 0, 0]],       // material 1 → black
     [2, [0, 0.9, 0.8]],   // material 2 → bright teal
   ])
-  const glbMeshes = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
+  const { meshes: glbMeshes } = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
   if (megaxe) {
     renderer.registerGeometry(MEGAXE_GEO_ID, megaxe.vertices, megaxe.indices)
@@ -97,6 +90,43 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     const eden = world.createEntity()
     world.addTransform(eden, { position: [-30, 0, 0], scale: edenMeshes[0]!.scale })
     world.addMeshInstance(eden, { geometryId: EDEN_GEO_START, color: [1, 1, 1] })
+  }
+
+  // ── Load player GLB ───────────────────────────────────────────────
+  const skinInstances: SkinInstance[] = []
+  const playerResult = await loadGlb('/player-bundle.glb')
+  const bodyMesh = playerResult.meshes.find(m => m.name === 'Body' && m.skinIndex !== undefined)
+
+  if (bodyMesh && bodyMesh.skinJoints && bodyMesh.skinWeights && bodyMesh.skinIndex !== undefined) {
+    renderer.registerSkinnedGeometry(
+      PLAYER_BODY_GEO_ID,
+      bodyMesh.vertices,
+      bodyMesh.indices,
+      bodyMesh.skinJoints,
+      bodyMesh.skinWeights,
+    )
+
+    const skin = playerResult.skins[bodyMesh.skinIndex]!
+    const skeleton = createSkeleton(skin, playerResult.nodeTransforms)
+
+    // Find "Run" animation
+    let runClipIdx = 0
+    for (let i = 0; i < playerResult.animations.length; i++) {
+      if (playerResult.animations[i]!.name.toLowerCase().includes('run')) {
+        runClipIdx = i
+        break
+      }
+    }
+
+    const skinInst = createSkinInstance(skeleton, runClipIdx)
+    skinInstances.push(skinInst)
+
+    // Player entity (replaces the cube)
+    const player = world.createEntity()
+    world.addTransform(player, { position: [0, 0, 0], scale: bodyMesh.scale })
+    world.addMeshInstance(player, { geometryId: PLAYER_BODY_GEO_ID, color: [1, 1, 1] })
+    world.addSkinned(player, 0)
+    world.addInputReceiver(player)
   }
 
   // ── Sphere entities (behind the cube, negative Z) ─────────────────
@@ -174,6 +204,11 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       if (input.isDown('KeyD')) world.positions[pi]! += MOVE_SPEED * dt
     }
 
+    // ── Animation system ──────────────────────────────────────────
+    for (const inst of skinInstances) {
+      updateSkinInstance(inst, playerResult.animations, dt)
+    }
+
     // ── Transform system ──────────────────────────────────────────
     for (let i = 0; i < world.entityCount; i++) {
       if (!(world.componentMask[i]! & TRANSFORM)) continue
@@ -204,7 +239,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     }
 
     // ── Render ────────────────────────────────────────────────────
-    renderer.render(world)
+    renderer.render(world, skinInstances)
     frames++
 
     requestAnimationFrame(loop)

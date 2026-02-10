@@ -272,6 +272,109 @@ export function quatToEulerYXZ(
   out[o + 2] = Math.atan2(2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz))
 }
 
+// ── vec3 lerp ───────────────────────────────────────────────────────
+
+export function v3Lerp(
+  out: Float32Array,
+  o: number,
+  a: Float32Array,
+  ao: number,
+  b: Float32Array,
+  bo: number,
+  t: number,
+): void {
+  out[o] = a[ao]! + (b[bo]! - a[ao]!) * t
+  out[o + 1] = a[ao + 1]! + (b[bo + 1]! - a[ao + 1]!) * t
+  out[o + 2] = a[ao + 2]! + (b[bo + 2]! - a[ao + 2]!) * t
+}
+
+// ── quaternion slerp ────────────────────────────────────────────────
+
+export function quatSlerp(
+  out: Float32Array,
+  o: number,
+  a: Float32Array,
+  ao: number,
+  b: Float32Array,
+  bo: number,
+  t: number,
+): void {
+  let ax = a[ao]!, ay = a[ao + 1]!, az = a[ao + 2]!, aw = a[ao + 3]!
+  let bx = b[bo]!, by = b[bo + 1]!, bz = b[bo + 2]!, bw = b[bo + 3]!
+
+  let dot = ax * bx + ay * by + az * bz + aw * bw
+  if (dot < 0) {
+    bx = -bx; by = -by; bz = -bz; bw = -bw
+    dot = -dot
+  }
+
+  if (dot > 0.9995) {
+    // Linear interpolation for very close quaternions
+    out[o] = ax + (bx - ax) * t
+    out[o + 1] = ay + (by - ay) * t
+    out[o + 2] = az + (bz - az) * t
+    out[o + 3] = aw + (bw - aw) * t
+  } else {
+    const theta = Math.acos(dot)
+    const sinTheta = Math.sin(theta)
+    const wa = Math.sin((1 - t) * theta) / sinTheta
+    const wb = Math.sin(t * theta) / sinTheta
+    out[o] = ax * wa + bx * wb
+    out[o + 1] = ay * wa + by * wb
+    out[o + 2] = az * wa + bz * wb
+    out[o + 3] = aw * wa + bw * wb
+  }
+
+  // Normalize
+  const nx = out[o]!, ny = out[o + 1]!, nz = out[o + 2]!, nw = out[o + 3]!
+  const len = Math.sqrt(nx * nx + ny * ny + nz * nz + nw * nw) || 1
+  out[o] = nx / len
+  out[o + 1] = ny / len
+  out[o + 2] = nz / len
+  out[o + 3] = nw / len
+}
+
+// ── mat4 from quaternion + TRS ──────────────────────────────────────
+
+export function m4FromQuatTRS(
+  out: Float32Array,
+  o: number,
+  pos: Float32Array,
+  po: number,
+  quat: Float32Array,
+  qo: number,
+  scl: Float32Array,
+  so: number,
+): void {
+  const qx = quat[qo]!, qy = quat[qo + 1]!, qz = quat[qo + 2]!, qw = quat[qo + 3]!
+  const sx = scl[so]!, sy = scl[so + 1]!, sz = scl[so + 2]!
+
+  const x2 = qx + qx, y2 = qy + qy, z2 = qz + qz
+  const xx = qx * x2, xy = qx * y2, xz = qx * z2
+  const yy = qy * y2, yz = qy * z2, zz = qz * z2
+  const wx = qw * x2, wy = qw * y2, wz = qw * z2
+
+  out[o]     = (1 - (yy + zz)) * sx
+  out[o + 1] = (xy + wz) * sx
+  out[o + 2] = (xz - wy) * sx
+  out[o + 3] = 0
+
+  out[o + 4] = (xy - wz) * sy
+  out[o + 5] = (1 - (xx + zz)) * sy
+  out[o + 6] = (yz + wx) * sy
+  out[o + 7] = 0
+
+  out[o + 8]  = (xz + wy) * sz
+  out[o + 9]  = (yz - wx) * sz
+  out[o + 10] = (1 - (xx + yy)) * sz
+  out[o + 11] = 0
+
+  out[o + 12] = pos[po]!
+  out[o + 13] = pos[po + 1]!
+  out[o + 14] = pos[po + 2]!
+  out[o + 15] = 1
+}
+
 export function m4FromTRS(
   out: Float32Array,
   o: number,

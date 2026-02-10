@@ -1,8 +1,12 @@
-import { TRANSFORM, MESH_INSTANCE, type World } from './ecs.ts'
+import { TRANSFORM, MESH_INSTANCE, SKINNED, type World } from './ecs.ts'
 import { m4Multiply, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
-import { lambertShader } from './shaders.ts'
+import { lambertShader, skinnedLambertShader } from './shaders.ts'
+import type { SkinInstance } from './skin.ts'
 
 const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
+const MAX_JOINTS = 128
+const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
+const MAX_SKINNED_ENTITIES = 64
 
 interface GeometryGPU {
   vertexBuffer: GPUBuffer
@@ -10,6 +14,10 @@ interface GeometryGPU {
   indexCount: number
   indexFormat: GPUIndexFormat
   boundingRadius: number
+}
+
+interface SkinnedGeometryGPU extends GeometryGPU {
+  skinBuffer: GPUBuffer
 }
 
 export async function initGPU(canvas: HTMLCanvasElement) {
@@ -26,6 +34,7 @@ export class Renderer {
   private device: GPUDevice
   private context: GPUCanvasContext
   private pipeline: GPURenderPipeline
+  private skinnedPipeline: GPURenderPipeline
   private depthTexture: GPUTexture
   private depthView: GPUTextureView
 
@@ -33,14 +42,17 @@ export class Renderer {
   private cameraBuffer: GPUBuffer
   private modelBuffer: GPUBuffer
   private lightingBuffer: GPUBuffer
+  private jointBuffer: GPUBuffer
 
   // Bind groups
   private cameraBG: GPUBindGroup
   private lightingBG: GPUBindGroup
   private modelBGL: GPUBindGroupLayout
   private modelBG: GPUBindGroup
+  private jointBG: GPUBindGroup
 
   private geometries = new Map<number, GeometryGPU>()
+  private skinnedGeometries = new Map<number, SkinnedGeometryGPU>()
   private maxEntities: number
 
   drawCalls = 0
@@ -60,8 +72,9 @@ export class Renderer {
     this.context = context
     this.maxEntities = maxEntities
 
-    // ── Shader module ─────────────────────────────────────────────────
+    // ── Shader modules ─────────────────────────────────────────────
     const shaderModule = device.createShaderModule({ code: lambertShader })
+    const skinnedShaderModule = device.createShaderModule({ code: skinnedLambertShader })
 
     // ── Bind group layouts ────────────────────────────────────────────
     const cameraBGL = device.createBindGroupLayout({
@@ -83,12 +96,24 @@ export class Renderer {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     })
+    const jointBGL = device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: true },
+        },
+      ],
+    })
 
     const pipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [cameraBGL, this.modelBGL, lightingBGL],
     })
+    const skinnedPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [cameraBGL, this.modelBGL, lightingBGL, jointBGL],
+    })
 
-    // ── Pipeline ──────────────────────────────────────────────────────
+    // ── Static pipeline ────────────────────────────────────────────
     this.pipeline = device.createRenderPipeline({
       layout: pipelineLayout,
       vertex: {
@@ -107,6 +132,43 @@ export class Renderer {
       },
       fragment: {
         module: shaderModule,
+        entryPoint: 'fs',
+        targets: [{ format }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+    })
+
+    // ── Skinned pipeline ───────────────────────────────────────────
+    this.skinnedPipeline = device.createRenderPipeline({
+      layout: skinnedPipelineLayout,
+      vertex: {
+        module: skinnedShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
+              { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
+              { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
+            ],
+          },
+          {
+            arrayStride: 20, // 4 bytes joints + 16 bytes weights
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' },    // joints
+              { shaderLocation: 4, offset: 4, format: 'float32x4' },  // weights
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: skinnedShaderModule,
         entryPoint: 'fs',
         targets: [{ format }],
       },
@@ -138,6 +200,11 @@ export class Renderer {
       size: 48,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    // Joint matrices storage buffer
+    this.jointBuffer = device.createBuffer({
+      size: JOINT_SLOT_SIZE * MAX_SKINNED_ENTITIES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
 
     // ── Bind groups ───────────────────────────────────────────────────
     this.cameraBG = device.createBindGroup({
@@ -151,6 +218,10 @@ export class Renderer {
     this.lightingBG = device.createBindGroup({
       layout: lightingBGL,
       entries: [{ binding: 0, resource: { buffer: this.lightingBuffer } }],
+    })
+    this.jointBG = device.createBindGroup({
+      layout: jointBGL,
+      entries: [{ binding: 0, resource: { buffer: this.jointBuffer, size: JOINT_SLOT_SIZE } }],
     })
   }
 
@@ -196,7 +267,73 @@ export class Renderer {
     this.geometries.set(id, { vertexBuffer, indexBuffer, indexCount: indices.length, indexFormat, boundingRadius: Math.sqrt(maxR2) })
   }
 
-  render(world: World): void {
+  registerSkinnedGeometry(
+    id: number,
+    vertices: Float32Array,
+    indices: Uint16Array | Uint32Array,
+    joints: Uint8Array,
+    weights: Float32Array,
+  ): void {
+    const device = this.device
+
+    // Vertex buffer 0 (position, normal, color)
+    const vertexBuffer = device.createBuffer({
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(vertexBuffer, 0, vertices.buffer as ArrayBuffer, vertices.byteOffset, vertices.byteLength)
+
+    // Index buffer
+    const indexByteSize = (indices.byteLength + 3) & ~3
+    const indexBuffer = device.createBuffer({
+      size: indexByteSize,
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    })
+    const indexCopy = new Uint8Array(indexByteSize)
+    indexCopy.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength))
+    device.queue.writeBuffer(indexBuffer, 0, indexCopy.buffer as ArrayBuffer, 0, indexByteSize)
+
+    // Vertex buffer 1: interleaved [joints uint8x4, weights float32x4] = 20 bytes per vertex
+    const numVertices = joints.length / 4
+    const skinData = new ArrayBuffer(numVertices * 20)
+    const skinView = new DataView(skinData)
+    for (let i = 0; i < numVertices; i++) {
+      const off = i * 20
+      skinView.setUint8(off, joints[i * 4]!)
+      skinView.setUint8(off + 1, joints[i * 4 + 1]!)
+      skinView.setUint8(off + 2, joints[i * 4 + 2]!)
+      skinView.setUint8(off + 3, joints[i * 4 + 3]!)
+      skinView.setFloat32(off + 4, weights[i * 4]!, true)
+      skinView.setFloat32(off + 8, weights[i * 4 + 1]!, true)
+      skinView.setFloat32(off + 12, weights[i * 4 + 2]!, true)
+      skinView.setFloat32(off + 16, weights[i * 4 + 3]!, true)
+    }
+    const skinBuffer = device.createBuffer({
+      size: skinData.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(skinBuffer, 0, skinData)
+
+    // Bounding sphere
+    let maxR2 = 0
+    for (let i = 0; i < vertices.length; i += 9) {
+      const x = vertices[i]!, y = vertices[i + 1]!, z = vertices[i + 2]!
+      const r2 = x * x + y * y + z * z
+      if (r2 > maxR2) maxR2 = r2
+    }
+
+    const indexFormat: GPUIndexFormat = indices instanceof Uint32Array ? 'uint32' : 'uint16'
+    this.skinnedGeometries.set(id, {
+      vertexBuffer,
+      indexBuffer,
+      indexCount: indices.length,
+      indexFormat,
+      boundingRadius: Math.sqrt(maxR2),
+      skinBuffer,
+    })
+  }
+
+  render(world: World, skinInstances?: SkinInstance[]): void {
     const device = this.device
     const cam = world.activeCamera
     if (cam < 0) return
@@ -225,7 +362,10 @@ export class Renderer {
       if ((world.componentMask[i]! & meshMask) !== meshMask) continue
 
       // Frustum cull: bounding sphere in world space
-      const geo = this.geometries.get(world.geometryIds[i]!)
+      const isSkinned = !!(world.componentMask[i]! & SKINNED)
+      const geo = isSkinned
+        ? this.skinnedGeometries.get(world.geometryIds[i]!)
+        : this.geometries.get(world.geometryIds[i]!)
       if (!geo) continue
       const si = i * 3
       const sx = Math.abs(world.scales[si]!)
@@ -243,6 +383,29 @@ export class Renderer {
       modelSlot[18] = world.colors[i * 3 + 2]!
       modelSlot[19] = 1.0
       device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 20)
+    }
+
+    // Upload joint matrices for skinned entities
+    let skinnedSlot = 0
+    const skinnedSlotMap = new Map<number, number>() // entity → slot
+    if (skinInstances) {
+      for (let i = 0; i < world.entityCount; i++) {
+        if (!(world.componentMask[i]! & SKINNED)) continue
+        const instId = world.skinInstanceIds[i]!
+        if (instId < 0) continue
+        const inst = skinInstances[instId]
+        if (!inst) continue
+
+        skinnedSlotMap.set(i, skinnedSlot)
+        device.queue.writeBuffer(
+          this.jointBuffer,
+          skinnedSlot * JOINT_SLOT_SIZE,
+          inst.jointMatrices.buffer as ArrayBuffer,
+          inst.jointMatrices.byteOffset,
+          inst.jointMatrices.byteLength,
+        )
+        skinnedSlot++
+      }
     }
 
     // ── Render pass ───────────────────────────────────────────────────
@@ -264,13 +427,16 @@ export class Renderer {
       },
     })
 
+    let draws = 0
+
+    // ── Static draw pass ──────────────────────────────────────────────
     pass.setPipeline(this.pipeline)
     pass.setBindGroup(0, this.cameraBG)
     pass.setBindGroup(2, this.lightingBG)
 
-    let draws = 0
     for (let i = 0; i < world.entityCount; i++) {
       if ((world.componentMask[i]! & meshMask) !== meshMask) continue
+      if (world.componentMask[i]! & SKINNED) continue // skip skinned in static pass
       const geo = this.geometries.get(world.geometryIds[i]!)
       if (!geo) continue
 
@@ -289,6 +455,39 @@ export class Renderer {
       pass.drawIndexed(geo.indexCount)
       draws++
     }
+
+    // ── Skinned draw pass ─────────────────────────────────────────────
+    if (skinnedSlotMap.size > 0) {
+      pass.setPipeline(this.skinnedPipeline)
+      pass.setBindGroup(0, this.cameraBG)
+      pass.setBindGroup(2, this.lightingBG)
+
+      for (let i = 0; i < world.entityCount; i++) {
+        if ((world.componentMask[i]! & (meshMask | SKINNED)) !== (meshMask | SKINNED)) continue
+        const geo = this.skinnedGeometries.get(world.geometryIds[i]!)
+        if (!geo) continue
+        const slot = skinnedSlotMap.get(i)
+        if (slot === undefined) continue
+
+        // Frustum cull
+        const si = i * 3
+        const sx = Math.abs(world.scales[si]!)
+        const sy = Math.abs(world.scales[si + 1]!)
+        const sz = Math.abs(world.scales[si + 2]!)
+        const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
+        const r = geo.boundingRadius * maxScale
+        if (!frustumContainsSphere(planes, world.positions[si]!, world.positions[si + 1]!, world.positions[si + 2]!, r)) continue
+
+        pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+        pass.setBindGroup(3, this.jointBG, [slot * JOINT_SLOT_SIZE])
+        pass.setVertexBuffer(0, geo.vertexBuffer)
+        pass.setVertexBuffer(1, geo.skinBuffer)
+        pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+        pass.drawIndexed(geo.indexCount)
+        draws++
+      }
+    }
+
     this.drawCalls = draws
 
     pass.end()
