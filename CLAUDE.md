@@ -1,111 +1,52 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# CLAUDE.md
 
-Default to using Bun instead of Node.js.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
+## Commands
 
-## APIs
+- `bun run dev` — Start Next.js dev server
+- `bun run build` — Production build
+- `bunx tsc --noEmit` — Type-check (no output files)
+- `bun test` — Run tests (bun:test, not jest/vitest)
+- `bun install` — Install dependencies (not npm/yarn/pnpm)
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+## Tooling
 
-## Testing
+Default to **Bun** instead of Node.js for all commands (`bun <file>`, `bun install`, `bunx`, `bun run <script>`). Bun auto-loads `.env` — don't use dotenv.
 
-Use `bun test` to run tests.
+TypeScript is strict with `noUncheckedIndexedAccess` enabled — all indexed TypedArray accesses need `!` assertions. WebGPU types come from `@webgpu/types`.
 
-```ts#index.test.ts
-import { test, expect } from "bun:test";
+All `src/` imports use explicit `.ts` extensions (`from './ecs.ts'`), enabled by `allowImportingTsExtensions` in tsconfig.
 
-test("hello world", () => {
-  expect(1).toBe(1);
-});
-```
+When passing TypedArrays to `device.queue.writeBuffer`, cast the buffer: `writeBuffer(buf, 0, arr.buffer as ArrayBuffer, arr.byteOffset, arr.byteLength)` — strict TS rejects `ArrayBufferLike` where `ArrayBuffer` is expected.
 
-## Frontend
+## Architecture
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+**Mana Engine** is a minimal WebGPU ECS game engine. Next.js serves a single page (`pages/index.tsx`) that mounts a fullscreen `<canvas>` and dynamically imports the engine (`src/main.ts`) to avoid SSR issues with browser APIs.
 
-Server:
+The engine is pure TypeScript with no React dependency. All engine code lives in `src/`.
 
-```ts#index.ts
-import index from "./index.html"
+### Per-frame system execution order (game loop in `main.ts`):
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
+1. **Input system** — WASD keyboard state applied to entities with `TRANSFORM | INPUT_RECEIVER`
+2. **Transform system** — Compute `worldMatrix` from position/rotation/scale via `m4FromTRS`
+3. **Camera system** — Compute view matrix from OrbitControls' `eye`/`target` Float32Arrays, and projection matrix
+4. **Render system** — Frustum cull, upload uniforms, issue draw calls
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
+### Key design patterns:
 
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
+- **Zero-allocation math** (`math.ts`): All vec3/mat4 functions write to a pre-allocated `Float32Array` at a given offset. No temp objects, no GC pressure in the hot path.
+- **Structure-of-Arrays ECS** (`ecs.ts`): Component data stored as parallel TypedArrays (e.g., `positions: Float32Array[MAX*3]`), not per-entity objects. Component presence tracked via bitmasks (`TRANSFORM = 1 << 0`, etc.) with inline iteration — no query abstraction.
+- **Dynamic uniform buffer** (`renderer.ts`): Per-entity model data packed into 256-byte aligned slots in a single GPU buffer, bound via dynamic offsets to avoid per-entity bind group allocation.
+- **Frustum culling** (`renderer.ts` + `math.ts`): Gribb-Hartmann plane extraction from the VP matrix, bounding sphere test per entity before upload and draw.
+- **OrbitControls** (`orbit-controls.ts`): Spherical coordinates (theta/phi/radius) around a target point. Outputs `eye` and `target` Float32Arrays consumed by the camera system's `m4LookAt`. Left-drag orbits, right-drag pans, scroll zooms.
 
-With the following `frontend.tsx`:
+### Shader bind group layout (WGSL in `shaders.ts`):
 
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
+- Group 0: Camera (view + projection mat4x4f)
+- Group 1: Model with dynamic offset (world mat4x4f + color vec4f)
+- Group 2: Lighting (direction, dirColor, ambientColor — all vec4f for 16-byte alignment)
 
-// import .css files directly and it works
-import './index.css';
+### Geometry format:
 
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+Interleaved vertex data: `[px, py, pz, nx, ny, nz]` per vertex (stride 24 bytes). Cube is static data, sphere is procedurally generated via `createSphereGeometry(stacks, slices)`.
