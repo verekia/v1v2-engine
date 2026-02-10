@@ -253,6 +253,25 @@ export function frustumContainsSphere(
   return true
 }
 
+// Convert glTF quaternion [x,y,z,w] to Euler angles matching m4FromTRS rotation order (Y * X * Z)
+export function quatToEulerYXZ(
+  out: Float32Array,
+  o: number,
+  q: Float32Array,
+  qo: number,
+): void {
+  const qx = q[qo]!, qy = q[qo + 1]!, qz = q[qo + 2]!, qw = q[qo + 3]!
+
+  // R(1,2) = 2(qy*qz - qw*qx)
+  const r12 = 2 * (qy * qz - qw * qx)
+  // rx = asin(-R(1,2)), clamped for numerical safety
+  out[o] = Math.asin(-Math.max(-1, Math.min(1, r12)))
+  // ry = atan2(R(0,2), R(2,2))
+  out[o + 1] = Math.atan2(2 * (qx * qz + qw * qy), 1 - 2 * (qx * qx + qy * qy))
+  // rz = atan2(R(1,0), R(1,1))
+  out[o + 2] = Math.atan2(2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz))
+}
+
 export function m4FromTRS(
   out: Float32Array,
   o: number,

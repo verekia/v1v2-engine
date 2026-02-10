@@ -1,4 +1,4 @@
-// Interleaved: [px, py, pz, nx, ny, nz] per vertex (stride 24 bytes)
+// Interleaved: [px, py, pz, nx, ny, nz, cr, cg, cb] per vertex (stride 36 bytes)
 
 // ── Cube ──────────────────────────────────────────────────────────────
 // 24 vertices (4 per face × 6 faces), 36 indices
@@ -6,35 +6,35 @@
 // prettier-ignore
 export const cubeVertices = new Float32Array([
   // +Z face (front)
-  -1, -1,  1,   0,  0,  1,
-   1, -1,  1,   0,  0,  1,
-   1,  1,  1,   0,  0,  1,
-  -1,  1,  1,   0,  0,  1,
+  -1, -1,  1,   0,  0,  1,   1, 1, 1,
+   1, -1,  1,   0,  0,  1,   1, 1, 1,
+   1,  1,  1,   0,  0,  1,   1, 1, 1,
+  -1,  1,  1,   0,  0,  1,   1, 1, 1,
   // -Z face (back)
-   1, -1, -1,   0,  0, -1,
-  -1, -1, -1,   0,  0, -1,
-  -1,  1, -1,   0,  0, -1,
-   1,  1, -1,   0,  0, -1,
+   1, -1, -1,   0,  0, -1,   1, 1, 1,
+  -1, -1, -1,   0,  0, -1,   1, 1, 1,
+  -1,  1, -1,   0,  0, -1,   1, 1, 1,
+   1,  1, -1,   0,  0, -1,   1, 1, 1,
   // +Y face (top)
-  -1,  1,  1,   0,  1,  0,
-   1,  1,  1,   0,  1,  0,
-   1,  1, -1,   0,  1,  0,
-  -1,  1, -1,   0,  1,  0,
+  -1,  1,  1,   0,  1,  0,   1, 1, 1,
+   1,  1,  1,   0,  1,  0,   1, 1, 1,
+   1,  1, -1,   0,  1,  0,   1, 1, 1,
+  -1,  1, -1,   0,  1,  0,   1, 1, 1,
   // -Y face (bottom)
-  -1, -1, -1,   0, -1,  0,
-   1, -1, -1,   0, -1,  0,
-   1, -1,  1,   0, -1,  0,
-  -1, -1,  1,   0, -1,  0,
+  -1, -1, -1,   0, -1,  0,   1, 1, 1,
+   1, -1, -1,   0, -1,  0,   1, 1, 1,
+   1, -1,  1,   0, -1,  0,   1, 1, 1,
+  -1, -1,  1,   0, -1,  0,   1, 1, 1,
   // +X face (right)
-   1, -1,  1,   1,  0,  0,
-   1, -1, -1,   1,  0,  0,
-   1,  1, -1,   1,  0,  0,
-   1,  1,  1,   1,  0,  0,
+   1, -1,  1,   1,  0,  0,   1, 1, 1,
+   1, -1, -1,   1,  0,  0,   1, 1, 1,
+   1,  1, -1,   1,  0,  0,   1, 1, 1,
+   1,  1,  1,   1,  0,  0,   1, 1, 1,
   // -X face (left)
-  -1, -1, -1,  -1,  0,  0,
-  -1, -1,  1,  -1,  0,  0,
-  -1,  1,  1,  -1,  0,  0,
-  -1,  1, -1,  -1,  0,  0,
+  -1, -1, -1,  -1,  0,  0,   1, 1, 1,
+  -1, -1,  1,  -1,  0,  0,   1, 1, 1,
+  -1,  1,  1,  -1,  0,  0,   1, 1, 1,
+  -1,  1, -1,  -1,  0,  0,   1, 1, 1,
 ])
 
 // prettier-ignore
@@ -54,7 +54,7 @@ export function createSphereGeometry(
   slices = 24,
 ): { vertices: Float32Array; indices: Uint16Array } {
   const vertCount = (stacks + 1) * (slices + 1)
-  const vertices = new Float32Array(vertCount * 6)
+  const vertices = new Float32Array(vertCount * 9)
   let vi = 0
 
   for (let st = 0; st <= stacks; st++) {
@@ -74,6 +74,10 @@ export function createSphereGeometry(
       vertices[vi++] = nx
       vertices[vi++] = ny
       vertices[vi++] = nz
+      // color (white)
+      vertices[vi++] = 1
+      vertices[vi++] = 1
+      vertices[vi++] = 1
     }
   }
 

@@ -4,10 +4,12 @@ import { cubeVertices, cubeIndices, createSphereGeometry } from './geometry.ts'
 import { initGPU, Renderer } from './renderer.ts'
 import { InputManager } from './input.ts'
 import { OrbitControls } from './orbit-controls.ts'
+import { loadGlb } from './gltf.ts'
 
 const MOVE_SPEED = 3
 const CUBE_GEO_ID = 0
 const SPHERE_GEO_ID = 1
+const MEGAXE_GEO_ID = 2
 const UP = new Float32Array([0, 1, 0])
 
 export async function startDemo(canvas: HTMLCanvasElement) {
@@ -15,7 +17,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const { device, context, format } = await initGPU(canvas)
   const world = new World()
   const input = new InputManager()
-  const renderer = new Renderer(device, context, format, canvas)
+  const renderer = new Renderer(device, context, format, canvas, 10000)
   const orbit = new OrbitControls(canvas)
 
   renderer.registerGeometry(CUBE_GEO_ID, cubeVertices, cubeIndices)
@@ -26,7 +28,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Camera entity ─────────────────────────────────────────────────
   const cam = world.createEntity()
   world.addTransform(cam, { position: [0, 3, 8] })
-  world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 100 })
+  world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 500 })
   world.activeCamera = cam
 
   // ── Cube entity ───────────────────────────────────────────────────
@@ -34,6 +36,38 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   world.addTransform(cube, { position: [0, 0, 0], scale: [1, 1, 1] })
   world.addMeshInstance(cube, { geometryId: CUBE_GEO_ID, color: [0.8, 0.2, 0.2] })
   world.addInputReceiver(cube)
+
+  // ── Megaxe entity ────────────────────────────────────────────────
+  const megaxeColors = new Map<number, [number, number, number]>([
+    [0, [1, 1, 1]],       // material 0 → white
+    [1, [0, 0, 0]],       // material 1 → black
+    [2, [0, 0.9, 0.8]],   // material 2 → bright teal
+  ])
+  const glbMeshes = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
+  const megaxe = glbMeshes.find(m => m.name === 'megaxe')
+  if (megaxe) {
+    renderer.registerGeometry(MEGAXE_GEO_ID, megaxe.vertices, megaxe.indices)
+    const axe = world.createEntity()
+    world.addTransform(axe, { position: [3, 0, 0], scale: megaxe.scale })
+    world.addMeshInstance(axe, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
+  }
+
+  // ── Megaxe grid (behind spheres) ──────────────────────────────────
+  if (megaxe) {
+    const GRID_COLS = 100
+    const GRID_ROWS = 50
+    const GRID_SPACING = 3
+    const GRID_Z = -20
+    for (let row = 0; row < GRID_ROWS; row++) {
+      for (let col = 0; col < GRID_COLS; col++) {
+        const e = world.createEntity()
+        const x = (col - (GRID_COLS - 1) / 2) * GRID_SPACING
+        const y = (row - (GRID_ROWS - 1) / 2) * GRID_SPACING
+        world.addTransform(e, { position: [x, y, GRID_Z], scale: megaxe.scale })
+        world.addMeshInstance(e, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
+      }
+    }
+  }
 
   // ── Sphere entities (behind the cube, negative Z) ─────────────────
   const SPHERE_COLS = 7
@@ -62,8 +96,15 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   stats.style.cssText =
     'position:fixed;top:8px;left:8px;color:#fff;font:14px/1.4 monospace;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:4px;pointer-events:none'
   document.body.appendChild(stats)
+  let frames = 0
+  let fpsTime = performance.now()
+  let fps = 0
   setInterval(() => {
-    stats.textContent = `Draw calls: ${renderer.drawCalls}`
+    const now = performance.now()
+    fps = Math.round((frames * 1000) / (now - fpsTime))
+    frames = 0
+    fpsTime = now
+    stats.textContent = `FPS: ${fps}  Draw calls: ${renderer.drawCalls}`
   }, 500)
 
   // ── Resize handling ───────────────────────────────────────────────
@@ -134,6 +175,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     // ── Render ────────────────────────────────────────────────────
     renderer.render(world)
+    frames++
 
     requestAnimationFrame(loop)
   }

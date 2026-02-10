@@ -8,6 +8,7 @@ interface GeometryGPU {
   vertexBuffer: GPUBuffer
   indexBuffer: GPUBuffer
   indexCount: number
+  indexFormat: GPUIndexFormat
   boundingRadius: number
 }
 
@@ -95,10 +96,11 @@ export class Renderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 24, // 6 floats * 4 bytes
+            arrayStride: 36, // 9 floats * 4 bytes
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
               { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
+              { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
             ],
           },
         ],
@@ -166,7 +168,7 @@ export class Renderer {
     this.depthView = this.depthTexture.createView()
   }
 
-  registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array): void {
+  registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array): void {
     const vertexBuffer = this.device.createBuffer({
       size: vertices.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -179,15 +181,16 @@ export class Renderer {
     })
     this.device.queue.writeBuffer(indexBuffer, 0, indices.buffer as ArrayBuffer, indices.byteOffset, indices.byteLength)
 
-    // Compute bounding sphere radius from vertex positions (stride = 6 floats)
+    // Compute bounding sphere radius from vertex positions (stride = 9 floats)
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 6) {
+    for (let i = 0; i < vertices.length; i += 9) {
       const x = vertices[i]!, y = vertices[i + 1]!, z = vertices[i + 2]!
       const r2 = x * x + y * y + z * z
       if (r2 > maxR2) maxR2 = r2
     }
 
-    this.geometries.set(id, { vertexBuffer, indexBuffer, indexCount: indices.length, boundingRadius: Math.sqrt(maxR2) })
+    const indexFormat: GPUIndexFormat = indices instanceof Uint32Array ? 'uint32' : 'uint16'
+    this.geometries.set(id, { vertexBuffer, indexBuffer, indexCount: indices.length, indexFormat, boundingRadius: Math.sqrt(maxR2) })
   }
 
   render(world: World): void {
@@ -279,7 +282,7 @@ export class Renderer {
 
       pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
       pass.setVertexBuffer(0, geo.vertexBuffer)
-      pass.setIndexBuffer(geo.indexBuffer, 'uint16')
+      pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
       pass.drawIndexed(geo.indexCount)
       draws++
     }

@@ -27,11 +27,13 @@ struct Lighting {
 struct VSIn {
   @location(0) position : vec3f,
   @location(1) normal   : vec3f,
+  @location(2) color    : vec3f,
 };
 
 struct VSOut {
   @builtin(position) pos       : vec4f,
   @location(0)       worldNorm : vec3f,
+  @location(1)       vertColor : vec3f,
 };
 
 @vertex fn vs(input : VSIn) -> VSOut {
@@ -39,6 +41,7 @@ struct VSOut {
   let worldPos = model.world * vec4f(input.position, 1.0);
   out.pos = camera.projection * camera.view * worldPos;
   out.worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
+  out.vertColor = input.color;
   return out;
 }
 
@@ -49,7 +52,7 @@ struct VSOut {
   let NdotL = max(dot(N, L), 0.0);
   let diffuse  = lighting.dirColor.rgb * NdotL;
   let ambient  = lighting.ambientColor.rgb;
-  let finalColor = model.color.rgb * (diffuse + ambient);
+  let finalColor = model.color.rgb * input.vertColor * (diffuse + ambient);
   return vec4f(finalColor, 1.0);
 }
 `
