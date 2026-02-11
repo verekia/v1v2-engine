@@ -5,6 +5,8 @@ import {
   glUnlitVS,
   glUnlitFS,
   glSkinnedLambertVS,
+  glTexturedLambertVS,
+  glTexturedLambertFS,
   glShadowDepthVS,
   glSkinnedShadowDepthVS,
   glShadowDepthFS,
@@ -36,6 +38,14 @@ interface GeometryGL {
 
 interface SkinnedGeometryGL extends GeometryGL {
   skinVbo: WebGLBuffer
+}
+
+interface TexturedGeometryGL extends GeometryGL {
+  uvVbo: WebGLBuffer
+}
+
+interface TextureGL {
+  texture: WebGLTexture
 }
 
 function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
@@ -76,6 +86,7 @@ export class WebGLRenderer implements IRenderer {
   private staticProgram: WebGLProgram
   private skinnedProgram: WebGLProgram
   private unlitProgram: WebGLProgram
+  private texturedProgram: WebGLProgram
   private shadowDepthProgram: WebGLProgram
   private shadowSkinnedDepthProgram: WebGLProgram
 
@@ -92,8 +103,14 @@ export class WebGLRenderer implements IRenderer {
   private shadowMapLoc: WebGLUniformLocation | null
   private shadowMapSkinnedLoc: WebGLUniformLocation | null
 
+  // Textured
+  private texturedShadowMapLoc: WebGLUniformLocation | null = null
+  private texturedAoMapLoc: WebGLUniformLocation | null = null
+
   private geometries = new Map<number, GeometryGL>()
   private skinnedGeometries = new Map<number, SkinnedGeometryGL>()
+  private texturedGeometries = new Map<number, TexturedGeometryGL>()
+  private glTextures = new Map<number, TextureGL>()
   private maxEntities: number
 
   drawCalls = 0
@@ -115,11 +132,12 @@ export class WebGLRenderer implements IRenderer {
     this.staticProgram = createProgram(gl, glLambertVS, glLambertFS)
     this.skinnedProgram = createProgram(gl, glSkinnedLambertVS, glLambertFS)
     this.unlitProgram = createProgram(gl, glUnlitVS, glUnlitFS)
+    this.texturedProgram = createProgram(gl, glTexturedLambertVS, glTexturedLambertFS)
     this.shadowDepthProgram = createProgram(gl, glShadowDepthVS, glShadowDepthFS)
     this.shadowSkinnedDepthProgram = createProgram(gl, glSkinnedShadowDepthVS, glShadowDepthFS)
 
     // ── Bind UBO block indices ──────────────────────────────────────
-    for (const prog of [this.staticProgram, this.skinnedProgram]) {
+    for (const prog of [this.staticProgram, this.skinnedProgram, this.texturedProgram]) {
       const cameraIdx = gl.getUniformBlockIndex(prog, 'Camera')
       if (cameraIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, cameraIdx, UBO_CAMERA)
 
@@ -159,6 +177,8 @@ export class WebGLRenderer implements IRenderer {
     // Shadow map sampler uniform locations
     this.shadowMapLoc = gl.getUniformLocation(this.staticProgram, 'uShadowMap')
     this.shadowMapSkinnedLoc = gl.getUniformLocation(this.skinnedProgram, 'uShadowMap')
+    this.texturedShadowMapLoc = gl.getUniformLocation(this.texturedProgram, 'uShadowMap')
+    this.texturedAoMapLoc = gl.getUniformLocation(this.texturedProgram, 'uAoMap')
 
     // ── Create UBOs ─────────────────────────────────────────────────
     this.cameraUBO = gl.createBuffer()!
@@ -360,6 +380,102 @@ export class WebGLRenderer implements IRenderer {
     })
   }
 
+  registerTexturedGeometry(
+    id: number,
+    vertices: Float32Array,
+    indices: Uint16Array | Uint32Array,
+    uvs: Float32Array,
+  ): void {
+    const gl = this.gl
+
+    const vao = gl.createVertexArray()!
+    gl.bindVertexArray(vao)
+
+    // VBO 0: position/normal/color (stride 36)
+    const vbo = gl.createBuffer()!
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW)
+
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.enableVertexAttribArray(1)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.enableVertexAttribArray(2)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+
+    // VBO 1: UVs (float32x2 = 8 bytes per vertex)
+    const uvVbo = gl.createBuffer()!
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvVbo)
+    gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW)
+
+    gl.enableVertexAttribArray(3)
+    gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 8, 0)
+
+    // IBO
+    const ibo = gl.createBuffer()!
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    gl.bindVertexArray(null)
+
+    // Bounding sphere
+    let maxR2 = 0
+    for (let i = 0; i < vertices.length; i += 9) {
+      const x = vertices[i]!,
+        y = vertices[i + 1]!,
+        z = vertices[i + 2]!
+      const r2 = x * x + y * y + z * z
+      if (r2 > maxR2) maxR2 = r2
+    }
+
+    const indexType = indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
+    const geoData: TexturedGeometryGL = {
+      vao,
+      vbo,
+      ibo,
+      uvVbo,
+      indexCount: indices.length,
+      indexType,
+      boundingRadius: Math.sqrt(maxR2),
+    }
+    this.texturedGeometries.set(id, geoData)
+
+    // Also create a shadow-only VAO in the geometries map (position-only, no UVs needed)
+    const shadowVao = gl.createVertexArray()!
+    gl.bindVertexArray(shadowVao)
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo) // reuse same VBO
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.enableVertexAttribArray(1)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.enableVertexAttribArray(2)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo) // reuse same IBO
+    gl.bindVertexArray(null)
+
+    this.geometries.set(id, {
+      vao: shadowVao,
+      vbo,
+      ibo,
+      indexCount: indices.length,
+      indexType,
+      boundingRadius: Math.sqrt(maxR2),
+    })
+  }
+
+  registerTexture(id: number, data: Uint8Array, width: number, height: number): void {
+    const gl = this.gl
+    const texture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+    this.glTextures.set(id, { texture })
+  }
+
   render(scene: RenderScene): void {
     const gl = this.gl
 
@@ -543,6 +659,7 @@ export class WebGLRenderer implements IRenderer {
       if (!scene.renderMask[i]) continue
       if (scene.skinnedMask[i]) continue
       if (scene.unlitMask[i]) continue
+      if (scene.texturedMask[i]) continue
       if (scene.alphas[i]! < 1.0) continue
       const geo = this.geometries.get(scene.geometryIds[i]!)
       if (!geo) continue
@@ -555,6 +672,41 @@ export class WebGLRenderer implements IRenderer {
       const r = geo.boundingRadius * maxScale
       if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
         continue
+
+      gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
+      gl.bindVertexArray(geo.vao)
+      gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
+      draws++
+    }
+
+    // ── Opaque textured draw pass ─────────────────────────────────────
+    gl.useProgram(this.texturedProgram)
+    if (this.texturedShadowMapLoc !== null) gl.uniform1i(this.texturedShadowMapLoc, 0)
+    if (this.texturedAoMapLoc !== null) gl.uniform1i(this.texturedAoMapLoc, 1)
+
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
+      if (!scene.texturedMask[i]) continue
+      if (scene.alphas[i]! < 1.0) continue
+      const geo = this.texturedGeometries.get(scene.geometryIds[i]!)
+      if (!geo) continue
+      const texId = scene.aoMapIds[i]!
+      const tex = this.glTextures.get(texId)
+      if (!tex) continue
+
+      const si = i * 3
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
+      const r = geo.boundingRadius * maxScale
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
+
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, tex.texture)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
 
       gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
       gl.bindVertexArray(geo.vao)
@@ -638,14 +790,15 @@ export class WebGLRenderer implements IRenderer {
     gl.depthMask(false)
     gl.disable(gl.CULL_FACE)
 
-    let curSkinned = -1 // -1=unset, 0=static, 1=skinned
+    let curPipeType = -1 // -1=unset, 0=static, 1=skinned, 2=textured
     for (const i of tpOrder) {
       const isSkinned = !!scene.skinnedMask[i]
+      const isTextured = !!scene.texturedMask[i]
       if (isSkinned) {
-        if (curSkinned !== 1) {
+        if (curPipeType !== 1) {
           gl.useProgram(this.skinnedProgram)
           if (this.shadowMapSkinnedLoc !== null) gl.uniform1i(this.shadowMapSkinnedLoc, 0)
-          curSkinned = 1
+          curPipeType = 1
         }
         const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)!
         const slot = skinnedSlotMap.get(i)
@@ -654,11 +807,30 @@ export class WebGLRenderer implements IRenderer {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_JOINTS, this.jointUBO, slot * JOINT_SLOT_SIZE, JOINT_SLOT_SIZE)
         gl.bindVertexArray(geo.vao)
         gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
+      } else if (isTextured) {
+        if (curPipeType !== 2) {
+          gl.useProgram(this.texturedProgram)
+          if (this.texturedShadowMapLoc !== null) gl.uniform1i(this.texturedShadowMapLoc, 0)
+          if (this.texturedAoMapLoc !== null) gl.uniform1i(this.texturedAoMapLoc, 1)
+          curPipeType = 2
+        }
+        const geo = this.texturedGeometries.get(scene.geometryIds[i]!)
+        if (!geo) continue
+        const texId = scene.aoMapIds[i]!
+        const tex = this.glTextures.get(texId)
+        if (!tex) continue
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, tex.texture)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
+        gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
+        gl.bindVertexArray(geo.vao)
+        gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
       } else {
-        if (curSkinned !== 0) {
+        if (curPipeType !== 0) {
           gl.useProgram(this.staticProgram)
           if (this.shadowMapLoc !== null) gl.uniform1i(this.shadowMapLoc, 0)
-          curSkinned = 0
+          curPipeType = 0
         }
         const geo = this.geometries.get(scene.geometryIds[i]!)!
         gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
@@ -689,8 +861,18 @@ export class WebGLRenderer implements IRenderer {
       gl.deleteBuffer(geo.ibo)
       gl.deleteBuffer(geo.skinVbo)
     }
+    for (const geo of this.texturedGeometries.values()) {
+      gl.deleteVertexArray(geo.vao)
+      gl.deleteBuffer(geo.uvVbo)
+      // vbo + ibo already destroyed via geometries map
+    }
+    for (const tex of this.glTextures.values()) {
+      gl.deleteTexture(tex.texture)
+    }
     this.geometries.clear()
     this.skinnedGeometries.clear()
+    this.texturedGeometries.clear()
+    this.glTextures.clear()
     gl.deleteBuffer(this.cameraUBO)
     gl.deleteBuffer(this.modelUBO)
     gl.deleteBuffer(this.lightingUBO)
@@ -700,6 +882,7 @@ export class WebGLRenderer implements IRenderer {
     gl.deleteTexture(this.shadowTexture)
     gl.deleteProgram(this.staticProgram)
     gl.deleteProgram(this.skinnedProgram)
+    gl.deleteProgram(this.texturedProgram)
     gl.deleteProgram(this.unlitProgram)
     gl.deleteProgram(this.shadowDepthProgram)
     gl.deleteProgram(this.shadowSkinnedDepthProgram)

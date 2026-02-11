@@ -1,5 +1,6 @@
 import { createRenderer as createRendererInternal } from './gpu.ts'
 import { m4FromTRS, m4LookAt, m4Multiply, v3Normalize, v3Scale } from './math.ts'
+import { findBoneNodeIndex } from './skin.ts'
 
 import type { BackendType, IRenderer, RenderScene } from './renderer.ts'
 import type { SkinInstance } from './skin.ts'
@@ -54,6 +55,7 @@ export interface MeshOptions {
   unlit?: boolean
   skinned?: boolean
   skinInstanceId?: number
+  aoMap?: number
 }
 
 export class Mesh {
@@ -67,6 +69,10 @@ export class Mesh {
   unlit: boolean
   skinned: boolean
   skinInstanceId: number
+  aoMap: number
+  boneParent: Mesh | null = null
+  boneSkinInstance: SkinInstance | null = null
+  boneNodeIndex = -1
 
   constructor(opts: MeshOptions) {
     this.position = new Float32Array(opts.position ?? [0, 0, 0])
@@ -78,20 +84,35 @@ export class Mesh {
     this.unlit = opts.unlit ?? false
     this.skinned = opts.skinned ?? false
     this.skinInstanceId = opts.skinInstanceId ?? -1
+    this.aoMap = opts.aoMap ?? -1
   }
 }
 
 // ── Geometry registration (internal) ────────────────────────────────────────
 
 type GeoReg =
-  | { vertices: Float32Array; indices: Uint16Array | Uint32Array; skinned: false }
+  | { type: 'static'; vertices: Float32Array; indices: Uint16Array | Uint32Array; skinned: false }
   | {
+      type: 'skinned'
       vertices: Float32Array
       indices: Uint16Array | Uint32Array
       joints: Uint8Array
       weights: Float32Array
       skinned: true
     }
+  | {
+      type: 'textured'
+      vertices: Float32Array
+      indices: Uint16Array | Uint32Array
+      uvs: Float32Array
+      skinned: false
+    }
+
+interface TexReg {
+  data: Uint8Array
+  width: number
+  height: number
+}
 
 // ── Scene ───────────────────────────────────────────────────────────────────
 
@@ -108,7 +129,9 @@ export class Scene {
   private _canvas: HTMLCanvasElement
   private _maxEntities: number
   private _geoRegs = new Map<number, GeoReg>()
+  private _texRegs = new Map<number, TexReg>()
   private _nextGeoId = 0
+  private _nextTexId = 0
 
   // SoA arrays synced before each render
   private _positions: Float32Array
@@ -121,10 +144,15 @@ export class Scene {
   private _renderMask: Uint8Array
   private _skinnedMask: Uint8Array
   private _unlitMask: Uint8Array
+  private _texturedMask: Uint8Array
+  private _aoMapIds: Int16Array
 
   // View/projection matrices (written during render)
   private _viewMatrix = new Float32Array(16)
   private _projMatrix = new Float32Array(16)
+
+  // Bone attachment scratch buffers
+  private _boneScratch = new Float32Array(16)
 
   // Shadow scratch buffers
   private _lightDirNorm = new Float32Array(3)
@@ -148,6 +176,8 @@ export class Scene {
     this._renderMask = new Uint8Array(maxEntities)
     this._skinnedMask = new Uint8Array(maxEntities)
     this._unlitMask = new Uint8Array(maxEntities)
+    this._texturedMask = new Uint8Array(maxEntities)
+    this._aoMapIds = new Int16Array(maxEntities).fill(-1)
   }
 
   get backendType(): BackendType {
@@ -167,7 +197,7 @@ export class Scene {
   registerGeometry(vertices: Float32Array, indices: Uint16Array | Uint32Array): number {
     const id = this._nextGeoId++
     this._renderer.registerGeometry(id, vertices, indices)
-    this._geoRegs.set(id, { vertices, indices, skinned: false })
+    this._geoRegs.set(id, { type: 'static', vertices, indices, skinned: false })
     return id
   }
 
@@ -179,7 +209,21 @@ export class Scene {
   ): number {
     const id = this._nextGeoId++
     this._renderer.registerSkinnedGeometry(id, vertices, indices, joints, weights)
-    this._geoRegs.set(id, { vertices, indices, joints, weights, skinned: true })
+    this._geoRegs.set(id, { type: 'skinned', vertices, indices, joints, weights, skinned: true })
+    return id
+  }
+
+  registerTexturedGeometry(vertices: Float32Array, indices: Uint16Array | Uint32Array, uvs: Float32Array): number {
+    const id = this._nextGeoId++
+    this._renderer.registerTexturedGeometry(id, vertices, indices, uvs)
+    this._geoRegs.set(id, { type: 'textured', vertices, indices, uvs, skinned: false })
+    return id
+  }
+
+  registerTexture(data: Uint8Array, width: number, height: number): number {
+    const id = this._nextTexId++
+    this._renderer.registerTexture(id, data, width, height)
+    this._texRegs.set(id, { data, width, height })
     return id
   }
 
@@ -193,6 +237,23 @@ export class Scene {
   remove(mesh: Mesh): void {
     const idx = this._meshes.indexOf(mesh)
     if (idx >= 0) this._meshes.splice(idx, 1)
+  }
+
+  // ── Bone attachment ────────────────────────────────────────────────────
+
+  attachToBone(mesh: Mesh, parentMesh: Mesh, boneName: string): void {
+    if (parentMesh.skinInstanceId < 0) throw new Error('Parent mesh has no skin instance')
+    const skinInstance = this.skinInstances[parentMesh.skinInstanceId]!
+    const nodeIndex = findBoneNodeIndex(skinInstance.skeleton, boneName)
+    mesh.boneParent = parentMesh
+    mesh.boneSkinInstance = skinInstance
+    mesh.boneNodeIndex = nodeIndex
+  }
+
+  detachFromBone(mesh: Mesh): void {
+    mesh.boneParent = null
+    mesh.boneSkinInstance = null
+    mesh.boneNodeIndex = -1
   }
 
   // ── Lighting ────────────────────────────────────────────────────────────
@@ -221,11 +282,18 @@ export class Scene {
 
     // Re-register all geometries on the new renderer
     for (const [id, reg] of this._geoRegs) {
-      if (reg.skinned) {
+      if (reg.type === 'skinned') {
         this._renderer.registerSkinnedGeometry(id, reg.vertices, reg.indices, reg.joints, reg.weights)
+      } else if (reg.type === 'textured') {
+        this._renderer.registerTexturedGeometry(id, reg.vertices, reg.indices, reg.uvs)
       } else {
         this._renderer.registerGeometry(id, reg.vertices, reg.indices)
       }
+    }
+
+    // Re-register all textures on the new renderer
+    for (const [id, tex] of this._texRegs) {
+      this._renderer.registerTexture(id, tex.data, tex.width, tex.height)
     }
   }
 
@@ -269,6 +337,27 @@ export class Scene {
       this._renderMask[i] = m.visible ? 1 : 0
       this._skinnedMask[i] = m.skinned ? 1 : 0
       this._unlitMask[i] = m.unlit ? 1 : 0
+      this._texturedMask[i] = m.aoMap >= 0 ? 1 : 0
+      this._aoMapIds[i] = m.aoMap
+    }
+
+    // Bone attachment pass: override world matrices for bone-attached meshes
+    for (let i = 0; i < count; i++) {
+      const m = meshes[i]!
+      if (!m.boneParent || !m.boneSkinInstance || m.boneNodeIndex < 0) continue
+      const parentIdx = this._meshes.indexOf(m.boneParent)
+      if (parentIdx < 0) continue
+      const boneGlobal = m.boneSkinInstance.globalMatrices
+      const boneOff = m.boneNodeIndex * 16
+      // temp = boneGlobalMatrix × meshLocalTRS
+      m4Multiply(this._boneScratch, 0, boneGlobal, boneOff, this._worldMatrices, i * 16)
+      // worldMatrices[i] = parentWorldMatrix × temp
+      m4Multiply(this._worldMatrices, i * 16, this._worldMatrices, parentIdx * 16, this._boneScratch, 0)
+      // Update positions from final world matrix so frustum culling uses the actual position
+      const wo = i * 16
+      this._positions[i * 3] = this._worldMatrices[wo + 12]!
+      this._positions[i * 3 + 1] = this._worldMatrices[wo + 13]!
+      this._positions[i * 3 + 2] = this._worldMatrices[wo + 14]!
     }
 
     // Build RenderScene
@@ -290,6 +379,8 @@ export class Scene {
       geometryIds: this._geometryIds,
       skinInstanceIds: this._skinInstanceIds,
       skinInstances: this.skinInstances,
+      texturedMask: this._texturedMask,
+      aoMapIds: this._aoMapIds,
     }
 
     // Compute shadow VP if enabled

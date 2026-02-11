@@ -2,12 +2,12 @@
 
 Engine in development for [Mana Blade](https://manablade.com/).
 
-A minimal, high-performance WebGPU/WebGL rendering engine with a Three.js-like API and ECS-level internal performance.
+A minimal, high-performance WebGPU/WebGL rendering engine with a Three.js-like API.
 
 ## Quickstart
 
 ```ts
-import { createScene, Mesh, OrbitControls, cubeVertices, cubeIndices } from 'mana-engine'
+import { createScene, Mesh, OrbitControls, cubeVertices, cubeIndices } from '@v1v2/engine'
 
 const canvas = document.querySelector('canvas')!
 const scene = await createScene(canvas)

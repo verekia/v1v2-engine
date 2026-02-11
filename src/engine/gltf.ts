@@ -10,6 +10,7 @@ export interface GltfMesh {
   rotation: [number, number, number] // euler ZXY
   scale: [number, number, number]
   color: [number, number, number]
+  uvs?: Float32Array
   skinJoints?: Uint8Array
   skinWeights?: Float32Array
   skinIndex?: number
@@ -35,6 +36,7 @@ export interface GltfAnimation {
 }
 
 export interface GltfNodeTransform {
+  name: string
   nodeIndex: number
   parentIndex: number // -1 for root
   translation: Float32Array // vec3
@@ -151,6 +153,7 @@ export async function loadGlb(
       s[2] = node.scale[2]
     }
     nodeTransforms.push({
+      name: node.name ?? '',
       nodeIndex: ni,
       parentIndex: childToParent.get(ni) ?? -1,
       translation: t,
@@ -270,6 +273,10 @@ export async function loadGlb(
           color,
         }
 
+        if (result.uvs) {
+          entry.uvs = result.uvs
+        }
+
         if (hasSkin && result.skinJoints && result.skinWeights) {
           entry.skinJoints = result.skinJoints
           entry.skinWeights = result.skinWeights
@@ -300,6 +307,7 @@ export async function loadGlb(
 interface PrimitiveResult {
   vertices: Float32Array
   indices: Uint16Array | Uint32Array
+  uvs?: Float32Array
   skinJoints?: Uint8Array
   skinWeights?: Float32Array
 }
@@ -378,6 +386,19 @@ function decodeDracoPrimitive(
     const matIdxAttr = decoder.GetAttributeByUniqueId(dracoMesh, dracoExt.attributes[matIdxKey])
     matIdxArray = new draco.DracoFloat32Array()
     decoder.GetAttributeFloatForAllPoints(dracoMesh, matIdxAttr, matIdxArray)
+  }
+
+  // Read TEXCOORD_0 from Draco (if present)
+  let uvs: Float32Array | undefined
+  if (dracoExt.attributes.TEXCOORD_0 !== undefined) {
+    const uvAttr = decoder.GetAttributeByUniqueId(dracoMesh, dracoExt.attributes.TEXCOORD_0)
+    const uvArray = new draco.DracoFloat32Array()
+    decoder.GetAttributeFloatForAllPoints(dracoMesh, uvAttr, uvArray)
+    uvs = new Float32Array(numVertices * 2)
+    for (let i = 0; i < numVertices * 2; i++) {
+      uvs[i] = uvArray.GetValue(i)
+    }
+    draco.destroy(uvArray)
   }
 
   // Read JOINTS_0 / WEIGHTS_0 from Draco (if present)
@@ -462,7 +483,7 @@ function decodeDracoPrimitive(
   draco.destroy(buffer)
   draco.destroy(decoder)
 
-  return { vertices, indices, skinJoints, skinWeights }
+  return { vertices, indices, uvs, skinJoints, skinWeights }
 }
 
 function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): PrimitiveResult | null {
@@ -497,6 +518,13 @@ function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): Pr
     vertices[vi + 8] = 1
   }
 
+  // Read TEXCOORD_0 if present
+  let uvs: Float32Array | undefined
+  if (primitive.attributes.TEXCOORD_0 !== undefined) {
+    const uvAccessor = gltf.accessors[primitive.attributes.TEXCOORD_0]
+    uvs = new Float32Array(readAccessorFloat32(uvAccessor, gltf, bin))
+  }
+
   // Read skin data (JOINTS_0 + WEIGHTS_0) if present
   let skinJoints: Uint8Array | undefined
   let skinWeights: Float32Array | undefined
@@ -510,7 +538,7 @@ function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): Pr
   const idxAccessor = gltf.accessors[primitive.indices]
   const indices = readAccessorIndices(idxAccessor, gltf, bin)
 
-  return { vertices, indices, skinJoints, skinWeights }
+  return { vertices, indices, uvs, skinJoints, skinWeights }
 }
 
 function readAccessorFloat32(accessor: any, gltf: any, bin: Uint8Array): Float32Array {

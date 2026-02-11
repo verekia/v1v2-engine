@@ -7,12 +7,15 @@ export type { BackendType, IRenderer, RenderScene } from './renderer.ts'
 export { OrbitControls } from './orbit-controls.ts'
 export { loadGlb } from './gltf.ts'
 export type { GltfMesh, GltfSkin, GltfAnimation, GltfAnimationChannel, GltfNodeTransform, GlbResult } from './gltf.ts'
-export { createSkeleton, createSkinInstance, updateSkinInstance, transitionTo } from './skin.ts'
+export { createSkeleton, createSkinInstance, updateSkinInstance, transitionTo, findBoneNodeIndex } from './skin.ts'
 export type { Skeleton, SkinInstance } from './skin.ts'
-export { cubeVertices, cubeIndices, createSphereGeometry, mergeGeometries } from './geometry.ts'
+export { createBoxGeometry, createSphereGeometry, mergeGeometries } from './geometry.ts'
+export { loadKTX2 } from './ktx2.ts'
+export type { KTX2Texture } from './ktx2.ts'
 export {
   lambertShader,
   skinnedLambertShader,
+  texturedLambertShader,
   unlitShader,
   shadowDepthShader,
   skinnedShadowDepthShader,
@@ -23,6 +26,8 @@ export {
   glUnlitVS,
   glUnlitFS,
   glSkinnedLambertVS,
+  glTexturedLambertVS,
+  glTexturedLambertFS,
   glShadowDepthVS,
   glSkinnedShadowDepthVS,
   glShadowDepthFS,

@@ -2,6 +2,7 @@ import { m4Multiply, m4Perspective, m4Ortho, m4ExtractFrustumPlanes, frustumCont
 import {
   lambertShader,
   skinnedLambertShader,
+  texturedLambertShader,
   unlitShader,
   shadowDepthShader,
   skinnedShadowDepthShader,
@@ -40,6 +41,13 @@ export interface IRenderer {
     joints: Uint8Array,
     weights: Float32Array,
   ): void
+  registerTexturedGeometry(
+    id: number,
+    vertices: Float32Array,
+    indices: Uint16Array | Uint32Array,
+    uvs: Float32Array,
+  ): void
+  registerTexture(id: number, data: Uint8Array, width: number, height: number): void
   render(scene: RenderScene): void
   resize(w: number, h: number): void
   destroy(): void
@@ -63,6 +71,8 @@ export interface RenderScene {
   geometryIds: Uint8Array
   skinInstanceIds: Int16Array
   skinInstances: SkinInstance[]
+  texturedMask: Uint8Array
+  aoMapIds: Int16Array
   shadowLightViewProj?: Float32Array
   shadowMapSize?: number
   shadowBias?: number
@@ -79,6 +89,15 @@ interface GeometryGPU {
 
 interface SkinnedGeometryGPU extends GeometryGPU {
   skinBuffer: GPUBuffer
+}
+
+interface TexturedGeometryGPU extends GeometryGPU {
+  uvBuffer: GPUBuffer
+}
+
+interface TextureGPU {
+  texture: GPUTexture
+  bindGroup: GPUBindGroup
 }
 
 export class Renderer implements IRenderer {
@@ -121,6 +140,11 @@ export class Renderer implements IRenderer {
 
   private geometries = new Map<number, GeometryGPU>()
   private skinnedGeometries = new Map<number, SkinnedGeometryGPU>()
+  private texturedGeometries = new Map<number, TexturedGeometryGPU>()
+  private textures = new Map<number, TextureGPU>()
+  private texturedPipeline!: GPURenderPipeline
+  private transparentTexturedPipeline!: GPURenderPipeline
+  private textureBGL!: GPUBindGroupLayout
   private maxEntities: number
 
   drawCalls = 0
@@ -302,6 +326,54 @@ export class Renderer implements IRenderer {
       multisample: { count: MSAA_SAMPLES },
     })
 
+    // ── Textured pipeline ────────────────────────────────────────────
+    const texturedShaderModule = device.createShaderModule({ code: texturedLambertShader })
+    this.textureBGL = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    })
+    const texturedPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [cameraBGL, this.modelBGL, this.lightingBGL, this.textureBGL],
+    })
+
+    const texturedVertexBuffers: GPUVertexBufferLayout[] = [
+      {
+        arrayStride: 36,
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x3' },
+          { shaderLocation: 1, offset: 12, format: 'float32x3' },
+          { shaderLocation: 2, offset: 24, format: 'float32x3' },
+        ],
+      },
+      {
+        arrayStride: 8,
+        attributes: [{ shaderLocation: 3, offset: 0, format: 'float32x2' }],
+      },
+    ]
+
+    this.texturedPipeline = device.createRenderPipeline({
+      layout: texturedPipelineLayout,
+      vertex: {
+        module: texturedShaderModule,
+        entryPoint: 'vs',
+        buffers: texturedVertexBuffers,
+      },
+      fragment: {
+        module: texturedShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
     // ── Transparent pipelines ─────────────────────────────────────────
     const alphaBlend: GPUBlendState = {
       color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
@@ -363,6 +435,27 @@ export class Renderer implements IRenderer {
       },
       fragment: {
         module: skinnedShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format, blend: alphaBlend }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.transparentTexturedPipeline = device.createRenderPipeline({
+      layout: texturedPipelineLayout,
+      vertex: {
+        module: texturedShaderModule,
+        entryPoint: 'vs',
+        buffers: texturedVertexBuffers,
+      },
+      fragment: {
+        module: texturedShaderModule,
         entryPoint: 'fs',
         targets: [{ format, blend: alphaBlend }],
       },
@@ -653,6 +746,95 @@ export class Renderer implements IRenderer {
     })
   }
 
+  registerTexturedGeometry(
+    id: number,
+    vertices: Float32Array,
+    indices: Uint16Array | Uint32Array,
+    uvs: Float32Array,
+  ): void {
+    const device = this.device
+
+    // Vertex buffer 0 (position, normal, color — same as standard)
+    const vertexBuffer = device.createBuffer({
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(vertexBuffer, 0, vertices.buffer as ArrayBuffer, vertices.byteOffset, vertices.byteLength)
+
+    // Index buffer
+    const indexByteSize = (indices.byteLength + 3) & ~3
+    const indexBuffer = device.createBuffer({
+      size: indexByteSize,
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    })
+    const indexCopy = new Uint8Array(indexByteSize)
+    indexCopy.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength))
+    device.queue.writeBuffer(indexBuffer, 0, indexCopy.buffer as ArrayBuffer, 0, indexByteSize)
+
+    // Vertex buffer 1: UVs (float32x2 = 8 bytes per vertex)
+    const uvBuffer = device.createBuffer({
+      size: uvs.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(uvBuffer, 0, uvs.buffer as ArrayBuffer, uvs.byteOffset, uvs.byteLength)
+
+    // Bounding sphere
+    let maxR2 = 0
+    for (let i = 0; i < vertices.length; i += 9) {
+      const x = vertices[i]!,
+        y = vertices[i + 1]!,
+        z = vertices[i + 2]!
+      const r2 = x * x + y * y + z * z
+      if (r2 > maxR2) maxR2 = r2
+    }
+
+    const indexFormat: GPUIndexFormat = indices instanceof Uint32Array ? 'uint32' : 'uint16'
+    const geoData: TexturedGeometryGPU = {
+      vertexBuffer,
+      indexBuffer,
+      indexCount: indices.length,
+      indexFormat,
+      boundingRadius: Math.sqrt(maxR2),
+      uvBuffer,
+    }
+    this.texturedGeometries.set(id, geoData)
+    // Also store in geometries map (without UV) so shadow pass picks it up
+    this.geometries.set(id, {
+      vertexBuffer,
+      indexBuffer,
+      indexCount: indices.length,
+      indexFormat,
+      boundingRadius: Math.sqrt(maxR2),
+    })
+  }
+
+  registerTexture(id: number, data: Uint8Array, width: number, height: number): void {
+    const device = this.device
+    const texture = device.createTexture({
+      size: [width, height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    device.queue.writeTexture(
+      { texture },
+      data.buffer as ArrayBuffer,
+      { bytesPerRow: width * 4, rowsPerImage: height },
+      [width, height],
+    )
+    const sampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
+    const bindGroup = device.createBindGroup({
+      layout: this.textureBGL,
+      entries: [
+        { binding: 0, resource: texture.createView() },
+        { binding: 1, resource: sampler },
+      ],
+    })
+    this.textures.set(id, { texture, bindGroup })
+  }
+
   render(scene: RenderScene): void {
     const device = this.device
 
@@ -868,6 +1050,7 @@ export class Renderer implements IRenderer {
       if (!scene.renderMask[i]) continue
       if (scene.skinnedMask[i]) continue
       if (scene.unlitMask[i]) continue
+      if (scene.texturedMask[i]) continue
       if (scene.alphas[i]! < 1.0) continue // defer transparent
       const geo = this.geometries.get(scene.geometryIds[i]!)
       if (!geo) continue
@@ -883,6 +1066,39 @@ export class Renderer implements IRenderer {
 
       pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
       pass.setVertexBuffer(0, geo.vertexBuffer)
+      pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+      pass.drawIndexed(geo.indexCount)
+      draws++
+    }
+
+    // ── Opaque textured draw pass ─────────────────────────────────────
+    pass.setPipeline(this.texturedPipeline)
+    pass.setBindGroup(0, this.cameraBG)
+    pass.setBindGroup(2, this.lightingBG)
+
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
+      if (!scene.texturedMask[i]) continue
+      if (scene.alphas[i]! < 1.0) continue
+      const geo = this.texturedGeometries.get(scene.geometryIds[i]!)
+      if (!geo) continue
+      const texId = scene.aoMapIds[i]!
+      const tex = this.textures.get(texId)
+      if (!tex) continue
+
+      const si = i * 3
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
+      const r = geo.boundingRadius * maxScale
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
+
+      pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+      pass.setBindGroup(3, tex.bindGroup)
+      pass.setVertexBuffer(0, geo.vertexBuffer)
+      pass.setVertexBuffer(1, geo.uvBuffer)
       pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
       pass.drawIndexed(geo.indexCount)
       draws++
@@ -962,15 +1178,16 @@ export class Renderer implements IRenderer {
 
     tpOrder.sort((a, b) => tpDist[b]! - tpDist[a]!)
 
-    let curSkinned = -1 // -1=unset, 0=static, 1=skinned
+    let curPipeType = -1 // -1=unset, 0=static, 1=skinned, 2=textured
     for (const i of tpOrder) {
       const isSkinned = !!scene.skinnedMask[i]
+      const isTextured = !!scene.texturedMask[i]
       if (isSkinned) {
-        if (curSkinned !== 1) {
+        if (curPipeType !== 1) {
           pass.setPipeline(this.transparentSkinnedPipeline)
           pass.setBindGroup(0, this.cameraBG)
           pass.setBindGroup(2, this.lightingBG)
-          curSkinned = 1
+          curPipeType = 1
         }
         const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)!
         const slot = skinnedSlotMap.get(i)
@@ -981,12 +1198,30 @@ export class Renderer implements IRenderer {
         pass.setVertexBuffer(1, geo.skinBuffer)
         pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
         pass.drawIndexed(geo.indexCount)
+      } else if (isTextured) {
+        if (curPipeType !== 2) {
+          pass.setPipeline(this.transparentTexturedPipeline)
+          pass.setBindGroup(0, this.cameraBG)
+          pass.setBindGroup(2, this.lightingBG)
+          curPipeType = 2
+        }
+        const geo = this.texturedGeometries.get(scene.geometryIds[i]!)
+        if (!geo) continue
+        const texId = scene.aoMapIds[i]!
+        const tex = this.textures.get(texId)
+        if (!tex) continue
+        pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+        pass.setBindGroup(3, tex.bindGroup)
+        pass.setVertexBuffer(0, geo.vertexBuffer)
+        pass.setVertexBuffer(1, geo.uvBuffer)
+        pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+        pass.drawIndexed(geo.indexCount)
       } else {
-        if (curSkinned !== 0) {
+        if (curPipeType !== 0) {
           pass.setPipeline(this.transparentPipeline)
           pass.setBindGroup(0, this.cameraBG)
           pass.setBindGroup(2, this.lightingBG)
-          curSkinned = 0
+          curPipeType = 0
         }
         const geo = this.geometries.get(scene.geometryIds[i]!)!
         pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
@@ -1013,8 +1248,17 @@ export class Renderer implements IRenderer {
       geo.indexBuffer.destroy()
       geo.skinBuffer.destroy()
     }
+    for (const geo of this.texturedGeometries.values()) {
+      geo.uvBuffer.destroy()
+      // vertexBuffer + indexBuffer already destroyed via geometries map
+    }
+    for (const tex of this.textures.values()) {
+      tex.texture.destroy()
+    }
     this.geometries.clear()
     this.skinnedGeometries.clear()
+    this.texturedGeometries.clear()
+    this.textures.clear()
     this.cameraBuffer.destroy()
     this.modelBuffer.destroy()
     this.lightingBuffer.destroy()

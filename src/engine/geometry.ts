@@ -1,95 +1,132 @@
 // Interleaved: [px, py, pz, nx, ny, nz, cr, cg, cb] per vertex (stride 36 bytes)
+// Z-up coordinate system: width=X, height=Z(up), depth=Y(forward)
 
-// ── Cube ──────────────────────────────────────────────────────────────
-// 24 vertices (4 per face × 6 faces), 36 indices
+// ── Box ─────────────────────────────────────────────────────────────
 
-// prettier-ignore
-export const cubeVertices = new Float32Array([
-  // +Z face (top)
-  -1, -1,  1,   0,  0,  1,   1, 1, 1,
-   1, -1,  1,   0,  0,  1,   1, 1, 1,
-   1,  1,  1,   0,  0,  1,   1, 1, 1,
-  -1,  1,  1,   0,  0,  1,   1, 1, 1,
-  // -Z face (bottom)
-   1, -1, -1,   0,  0, -1,   1, 1, 1,
-  -1, -1, -1,   0,  0, -1,   1, 1, 1,
-  -1,  1, -1,   0,  0, -1,   1, 1, 1,
-   1,  1, -1,   0,  0, -1,   1, 1, 1,
-  // +Y face (front)
-  -1,  1,  1,   0,  1,  0,   1, 1, 1,
-   1,  1,  1,   0,  1,  0,   1, 1, 1,
-   1,  1, -1,   0,  1,  0,   1, 1, 1,
-  -1,  1, -1,   0,  1,  0,   1, 1, 1,
-  // -Y face (back)
-  -1, -1, -1,   0, -1,  0,   1, 1, 1,
-   1, -1, -1,   0, -1,  0,   1, 1, 1,
-   1, -1,  1,   0, -1,  0,   1, 1, 1,
-  -1, -1,  1,   0, -1,  0,   1, 1, 1,
-  // +X face (right)
-   1, -1,  1,   1,  0,  0,   1, 1, 1,
-   1, -1, -1,   1,  0,  0,   1, 1, 1,
-   1,  1, -1,   1,  0,  0,   1, 1, 1,
-   1,  1,  1,   1,  0,  0,   1, 1, 1,
-  // -X face (left)
-  -1, -1, -1,  -1,  0,  0,   1, 1, 1,
-  -1, -1,  1,  -1,  0,  0,   1, 1, 1,
-  -1,  1,  1,  -1,  0,  0,   1, 1, 1,
-  -1,  1, -1,  -1,  0,  0,   1, 1, 1,
-])
+export function createBoxGeometry(
+  width = 1,
+  height = 1,
+  depth = 1,
+  widthSegments = 1,
+  heightSegments = 1,
+  depthSegments = 1,
+): { vertices: Float32Array; indices: Uint16Array } {
+  const ws = Math.max(1, widthSegments | 0)
+  const hs = Math.max(1, heightSegments | 0)
+  const ds = Math.max(1, depthSegments | 0)
 
-// prettier-ignore
-export const cubeIndices = new Uint16Array([
-   0,  1,  2,   0,  2,  3,   // +Z (top)
-   4,  5,  6,   4,  6,  7,   // -Z (bottom)
-   8,  9, 10,   8, 10, 11,   // +Y (front)
-  12, 13, 14,  12, 14, 15,   // -Y (back)
-  16, 17, 18,  16, 18, 19,   // +X
-  20, 21, 22,  20, 22, 23,   // -X
-])
+  const hw = width / 2
+  const hh = height / 2
+  const hd = depth / 2
 
-// ── Sphere (UV sphere) ───────────────────────────────────────────────
+  // Face +Z/-Z: grid ws × ds, Face +Y/-Y: grid ws × hs, Face +X/-X: grid hs × ds
+  const totalVerts = 2 * (ws + 1) * (ds + 1) + 2 * (ws + 1) * (hs + 1) + 2 * (hs + 1) * (ds + 1)
+  const totalIdx = 2 * ws * ds * 6 + 2 * ws * hs * 6 + 2 * hs * ds * 6
+
+  const vertices = new Float32Array(totalVerts * 9)
+  const indices = new Uint16Array(totalIdx)
+  let vi = 0
+  let ii = 0
+  let vertexOffset = 0
+
+  function buildFace(
+    nx: number,
+    ny: number,
+    nz: number,
+    uSegs: number,
+    vSegs: number,
+    pos: (u: number, v: number) => [number, number, number],
+  ) {
+    const start = vertexOffset
+    for (let iv = 0; iv <= vSegs; iv++) {
+      for (let iu = 0; iu <= uSegs; iu++) {
+        const [px, py, pz] = pos(iu / uSegs, iv / vSegs)
+        vertices[vi++] = px
+        vertices[vi++] = py
+        vertices[vi++] = pz
+        vertices[vi++] = nx
+        vertices[vi++] = ny
+        vertices[vi++] = nz
+        vertices[vi++] = 1
+        vertices[vi++] = 1
+        vertices[vi++] = 1
+      }
+    }
+    const row = uSegs + 1
+    for (let iv = 0; iv < vSegs; iv++) {
+      for (let iu = 0; iu < uSegs; iu++) {
+        const a = start + iv * row + iu
+        const b = a + row
+        indices[ii++] = a
+        indices[ii++] = a + 1
+        indices[ii++] = b + 1
+        indices[ii++] = a
+        indices[ii++] = b + 1
+        indices[ii++] = b
+      }
+    }
+    vertexOffset += (uSegs + 1) * (vSegs + 1)
+  }
+
+  // +Z (top)
+  buildFace(0, 0, 1, ws, ds, (u, v) => [-hw + u * width, -hd + v * depth, hh])
+  // -Z (bottom)
+  buildFace(0, 0, -1, ws, ds, (u, v) => [hw - u * width, -hd + v * depth, -hh])
+  // +Y (front)
+  buildFace(0, 1, 0, ws, hs, (u, v) => [-hw + u * width, hd, hh - v * height])
+  // -Y (back)
+  buildFace(0, -1, 0, ws, hs, (u, v) => [-hw + u * width, -hd, -hh + v * height])
+  // +X (right)
+  buildFace(1, 0, 0, hs, ds, (u, v) => [hw, -hd + v * depth, hh - u * height])
+  // -X (left)
+  buildFace(-1, 0, 0, hs, ds, (u, v) => [-hw, -hd + v * depth, -hh + u * height])
+
+  return { vertices, indices }
+}
+
+// ── Sphere (UV sphere) ──────────────────────────────────────────────
 
 export function createSphereGeometry(
-  stacks = 16,
-  slices = 24,
+  radius = 1,
+  widthSegments = 24,
+  heightSegments = 16,
   inverted = false,
 ): { vertices: Float32Array; indices: Uint16Array } {
-  const vertCount = (stacks + 1) * (slices + 1)
+  const ws = Math.max(3, widthSegments | 0)
+  const hs = Math.max(2, heightSegments | 0)
+  const vertCount = (hs + 1) * (ws + 1)
   const vertices = new Float32Array(vertCount * 9)
   const sign = inverted ? -1 : 1
   let vi = 0
 
-  for (let st = 0; st <= stacks; st++) {
-    const phi = (st / stacks) * Math.PI
+  for (let st = 0; st <= hs; st++) {
+    const phi = (st / hs) * Math.PI
     const sinP = Math.sin(phi)
     const cosP = Math.cos(phi)
-    for (let sl = 0; sl <= slices; sl++) {
-      const theta = (sl / slices) * Math.PI * 2
+    for (let sl = 0; sl <= ws; sl++) {
+      const theta = (sl / ws) * Math.PI * 2
       const nx = sinP * Math.cos(theta)
       const ny = sinP * Math.sin(theta)
       const nz = cosP
-      // position = normal (unit sphere)
-      vertices[vi++] = nx
-      vertices[vi++] = ny
-      vertices[vi++] = nz
-      // normal (flipped for inverted)
+      vertices[vi++] = nx * radius
+      vertices[vi++] = ny * radius
+      vertices[vi++] = nz * radius
       vertices[vi++] = nx * sign
       vertices[vi++] = ny * sign
       vertices[vi++] = nz * sign
-      // color (white)
       vertices[vi++] = 1
       vertices[vi++] = 1
       vertices[vi++] = 1
     }
   }
 
-  const triCount = stacks * slices * 2
+  const triCount = hs * ws * 2
   const indices = new Uint16Array(triCount * 3)
   let ii = 0
-  const row = slices + 1
+  const row = ws + 1
 
-  for (let st = 0; st < stacks; st++) {
-    for (let sl = 0; sl < slices; sl++) {
+  for (let st = 0; st < hs; st++) {
+    for (let sl = 0; sl < ws; sl++) {
       const a = st * row + sl
       const b = a + row
       if (inverted) {
@@ -120,16 +157,20 @@ export function mergeGeometries(
     vertices: Float32Array
     indices: Uint16Array | Uint32Array
     color: [number, number, number]
+    uvs?: Float32Array
   }[],
-): { vertices: Float32Array; indices: Uint32Array } {
+): { vertices: Float32Array; indices: Uint32Array; uvs?: Float32Array } {
   let totalVerts = 0
   let totalIdxs = 0
+  let hasAnyUVs = false
   for (const p of primitives) {
     totalVerts += p.vertices.length / 9
     totalIdxs += p.indices.length
+    if (p.uvs) hasAnyUVs = true
   }
   const vertices = new Float32Array(totalVerts * 9)
   const indices = new Uint32Array(totalIdxs)
+  const uvs = hasAnyUVs ? new Float32Array(totalVerts * 2) : undefined
   let vertOff = 0
   let idxOff = 0
   for (const p of primitives) {
@@ -146,6 +187,14 @@ export function mergeGeometries(
       vertices[dst + 6]! = p.color[0]
       vertices[dst + 7]! = p.color[1]
       vertices[dst + 8]! = p.color[2]
+      if (uvs) {
+        const uvDst = (vertOff + v) * 2
+        if (p.uvs) {
+          uvs[uvDst] = p.uvs[v * 2]!
+          uvs[uvDst + 1] = p.uvs[v * 2 + 1]!
+        }
+        // else zeros (Float32Array default)
+      }
     }
     for (let j = 0; j < p.indices.length; j++) {
       indices[idxOff + j] = p.indices[j]! + vertOff
@@ -153,5 +202,5 @@ export function mergeGeometries(
     vertOff += vCount
     idxOff += p.indices.length
   }
-  return { vertices, indices }
+  return uvs ? { vertices, indices, uvs } : { vertices, indices }
 }

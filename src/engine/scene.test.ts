@@ -12,12 +12,19 @@ const EPSILON = 1e-5
 function createMockRenderer(): IRenderer & {
   registered: Map<number, { vertices: Float32Array; indices: Uint16Array | Uint32Array }>
   skinnedRegistered: Map<number, { vertices: Float32Array; indices: Uint16Array | Uint32Array }>
+  texturedRegistered: Map<number, { vertices: Float32Array; indices: Uint16Array | Uint32Array; uvs: Float32Array }>
+  texturesRegistered: Map<number, { data: Uint8Array; width: number; height: number }>
   lastRenderScene: RenderScene | null
   renderCount: number
   resizeCalls: [number, number][]
 } {
   const registered = new Map<number, { vertices: Float32Array; indices: Uint16Array | Uint32Array }>()
   const skinnedRegistered = new Map<number, { vertices: Float32Array; indices: Uint16Array | Uint32Array }>()
+  const texturedRegistered = new Map<
+    number,
+    { vertices: Float32Array; indices: Uint16Array | Uint32Array; uvs: Float32Array }
+  >()
+  const texturesRegistered = new Map<number, { data: Uint8Array; width: number; height: number }>()
   let lastRenderScene: RenderScene | null = null
   let renderCount = 0
   const resizeCalls: [number, number][] = []
@@ -27,6 +34,8 @@ function createMockRenderer(): IRenderer & {
     drawCalls: 0,
     registered,
     skinnedRegistered,
+    texturedRegistered,
+    texturesRegistered,
     lastRenderScene,
     renderCount,
     resizeCalls,
@@ -47,6 +56,12 @@ function createMockRenderer(): IRenderer & {
     },
     registerSkinnedGeometry(id, vertices, indices) {
       skinnedRegistered.set(id, { vertices, indices })
+    },
+    registerTexturedGeometry(id, vertices, indices, uvs) {
+      texturedRegistered.set(id, { vertices, indices, uvs })
+    },
+    registerTexture(id, data, width, height) {
+      texturesRegistered.set(id, { data, width, height })
     },
     render(scene) {
       lastRenderScene = scene
@@ -138,6 +153,12 @@ describe('Mesh', () => {
     expect(m.unlit).toBe(false)
     expect(m.skinned).toBe(false)
     expect(m.skinInstanceId).toBe(-1)
+    expect(m.aoMap).toBe(-1)
+  })
+
+  test('aoMap can be set via options', () => {
+    const m = new Mesh({ geometry: 0, aoMap: 3 })
+    expect(m.aoMap).toBe(3)
   })
 })
 
@@ -175,6 +196,36 @@ describe('Scene geometry management', () => {
     expect(id1).toBe(1)
     expect(renderer.registered.size).toBe(1)
     expect(renderer.skinnedRegistered.size).toBe(1)
+  })
+
+  test('registerTexturedGeometry returns sequential IDs (shared counter)', () => {
+    const renderer = createMockRenderer()
+    const scene = new Scene(renderer, createMockCanvas(), 100)
+    const v = new Float32Array(9)
+    const idx = new Uint16Array(3)
+    const uvs = new Float32Array(6)
+
+    const id0 = scene.registerGeometry(v, idx)
+    const id1 = scene.registerTexturedGeometry(v, idx, uvs)
+
+    expect(id0).toBe(0)
+    expect(id1).toBe(1)
+    expect(renderer.registered.size).toBe(1)
+    expect(renderer.texturedRegistered.size).toBe(1)
+    expect(renderer.texturedRegistered.has(1)).toBe(true)
+  })
+
+  test('registerTexture returns sequential IDs', () => {
+    const renderer = createMockRenderer()
+    const scene = new Scene(renderer, createMockCanvas(), 100)
+    const data = new Uint8Array(16)
+
+    const id0 = scene.registerTexture(data, 2, 2)
+    const id1 = scene.registerTexture(data, 2, 2)
+
+    expect(id0).toBe(0)
+    expect(id1).toBe(1)
+    expect(renderer.texturesRegistered.size).toBe(2)
   })
 })
 
@@ -392,6 +443,22 @@ describe('Scene render', () => {
 
     const rs = renderer.lastRenderScene!
     expect(rs.shadowLightViewProj).toBeUndefined()
+  })
+
+  test('render syncs texturedMask and aoMapIds', () => {
+    const renderer = createMockRenderer()
+    const scene = new Scene(renderer, createMockCanvas(), 100)
+    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.add(new Mesh({ geometry: 0 }))
+    scene.add(new Mesh({ geometry: 0, aoMap: 2 }))
+
+    scene.render()
+
+    const rs = renderer.lastRenderScene!
+    expect(rs.texturedMask[0]).toBe(0)
+    expect(rs.texturedMask[1]).toBe(1)
+    expect(rs.aoMapIds[0]).toBe(-1)
+    expect(rs.aoMapIds[1]).toBe(2)
   })
 
   test('render with shadow enabled sets shadowLightViewProj and bias', () => {

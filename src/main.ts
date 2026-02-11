@@ -3,14 +3,14 @@ import {
   Mesh,
   OrbitControls,
   loadGlb,
+  loadKTX2,
   createSkeleton,
   createSkinInstance,
   updateSkinInstance,
   transitionTo,
+  createBoxGeometry,
   createSphereGeometry,
   mergeGeometries,
-  cubeVertices,
-  cubeIndices,
 } from './engine/index.ts'
 
 import type { BackendType } from './engine/index.ts'
@@ -22,9 +22,9 @@ const EDEN_COLORS: Record<string, [number, number, number]> = {
   Eden_1: [0.78, 0.44, 0.25],
   Eden_2: [0.85, 0.68, 0.3],
   Eden_3: [0.75, 0.75, 0.75],
-  Eden_4: [0.78, 0.3, 0.2],
+  Eden_4: [0.725, 0.38, 0.09],
   Eden_5: [0.25, 0.55, 0.2],
-  Eden_6: [0.3, 0.36, 0.3],
+  Eden_6: [0.212, 0.212, 0.212],
   Eden_7: [0.75, 0.75, 0.75],
   Eden_8: [0.15, 0.15, 0.18],
   Eden_9: [0.0, 0.75, 0.7],
@@ -93,8 +93,9 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   scene.shadow.bias = 0.0001
 
   // ── Register geometries ───────────────────────────────────────────────
-  const cubeGeo = scene.registerGeometry(cubeVertices, cubeIndices)
-  const skySphere = createSphereGeometry(16, 24, true)
+  const box = createBoxGeometry(2, 2, 2)
+  const cubeGeo = scene.registerGeometry(box.vertices, box.indices)
+  const skySphere = createSphereGeometry(1, 24, 16, true)
   const skyGeo = scene.registerGeometry(skySphere.vertices, skySphere.indices)
 
   // ── Sky sphere ────────────────────────────────────────────────────────
@@ -116,12 +117,25 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   ])
   const { meshes: glbMeshes } = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
+  let axeMesh: Mesh | undefined
   if (megaxe) {
     const geo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
-    scene.add(new Mesh({ geometry: geo, position: [44, 80, 0], scale: megaxe.scale, color: [1, 1, 1] }))
+    axeMesh = scene.add(
+      new Mesh({
+        geometry: geo,
+        position: [0, 0.3, 0],
+        rotation: [0, 0, Math.PI],
+        scale: megaxe.scale,
+        color: [1, 1, 1],
+      }),
+    )
   }
 
-  // ── Eden (merged into 1 draw call) ────────────────────────────────────
+  // ── Load AO texture ──────────────────────────────────────────────────
+  const aoTex = await loadKTX2('/city-ao.ktx2', '/basis-1.50/')
+  const aoTexId = scene.registerTexture(aoTex.data, aoTex.width, aoTex.height)
+
+  // ── Eden (merged into 1 draw call with AO map) ─────────────────────
   const edenMeshes = glbMeshes.filter(m => m.name.startsWith('Eden_'))
   if (edenMeshes.length > 0) {
     const merged = mergeGeometries(
@@ -129,10 +143,18 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         vertices: em.vertices,
         indices: em.indices,
         color: EDEN_COLORS[em.name] ?? [1, 1, 1],
+        uvs: em.uvs,
       })),
     )
-    const geo = scene.registerGeometry(merged.vertices, merged.indices)
-    scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenMeshes[0]!.scale, color: [1, 1, 1] }))
+    if (merged.uvs) {
+      const geo = scene.registerTexturedGeometry(merged.vertices, merged.indices, merged.uvs)
+      scene.add(
+        new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenMeshes[0]!.scale, color: [1, 1, 1], aoMap: aoTexId }),
+      )
+    } else {
+      const geo = scene.registerGeometry(merged.vertices, merged.indices)
+      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenMeshes[0]!.scale, color: [1, 1, 1] }))
+    }
   }
 
   // ── Load player GLB ───────────────────────────────────────────────────
@@ -187,6 +209,11 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         transitionTo(skinInst, animIndices[animCycleIndex]!, BLEND_DURATION)
       }
     })
+
+    // Attach megaxe to player's right hand bone
+    if (axeMesh) {
+      scene.attachToBone(axeMesh, player, 'Hand.R')
+    }
   }
 
   // ── Transparent cubes ─────────────────────────────────────────────────

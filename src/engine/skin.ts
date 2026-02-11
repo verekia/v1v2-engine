@@ -40,6 +40,13 @@ export interface SkinInstance {
 const _tempMat = new Float32Array(16)
 const _localMat = new Float32Array(16)
 
+export function findBoneNodeIndex(skeleton: Skeleton, boneName: string): number {
+  for (const nt of skeleton.nodeTransforms) {
+    if (nt.name === boneName) return nt.nodeIndex
+  }
+  throw new Error(`Bone "${boneName}" not found in skeleton`)
+}
+
 export function createSkeleton(skin: GltfSkin, nodeTransforms: GltfNodeTransform[]): Skeleton {
   // Compute topological traversal order (parents before children)
   // glTF doesn't guarantee parent nodes have lower indices than children

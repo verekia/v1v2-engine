@@ -68,7 +68,7 @@ requestAnimationFrame(loop)
 
 ### Internal performance architecture:
 
-Internally, `Scene` uses a **Structure-of-Arrays** layout — parallel TypedArrays for positions, scales, world matrices, colors, etc. On each `scene.render()` call, mesh object data is synced to these dense arrays, world matrices are computed via `m4FromTRS`, and the result is passed to the renderer as a zero-copy `RenderScene` interface. This gives Three.js-like ergonomics with ECS-level cache performance.
+Internally, `Scene` uses a **Structure-of-Arrays** layout — parallel TypedArrays for positions, scales, world matrices, colors, etc. On each `scene.render()` call, mesh object data is synced to these dense arrays, world matrices are computed via `m4FromTRS`, and the result is passed to the renderer as a zero-copy `RenderScene` interface. This gives Three.js-like ergonomics with high performance.
 
 ### Key design patterns:
 
