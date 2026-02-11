@@ -56,8 +56,8 @@ export class OrbitControls {
     this.prevY = e.clientY
 
     if (this.dragging === 'rotate') {
-      this.theta -= dx * this.rotateSensitivity
-      this.phi -= dy * this.rotateSensitivity
+      this.theta += dx * this.rotateSensitivity
+      this.phi += dy * this.rotateSensitivity
       // Wrap theta
       if (this.theta > TWO_PI) this.theta -= TWO_PI
       if (this.theta < 0) this.theta += TWO_PI
@@ -73,8 +73,8 @@ export class OrbitControls {
       const ry = -sinT
       // Up vector: world Z for simplicity
       const panScale = this.panSensitivity * this.radius * 0.1
-      this.targetX -= (dx * rx) * panScale
-      this.targetY -= (dx * ry) * panScale
+      this.targetX += (dx * rx) * panScale
+      this.targetY += (dx * ry) * panScale
       this.targetZ += dy * panScale
     }
 
