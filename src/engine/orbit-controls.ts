@@ -4,7 +4,7 @@ const HALF_PI = Math.PI / 2 - 0.001 // clamp to avoid gimbal flip
 export class OrbitControls {
   // Spherical coordinates
   theta = 0          // horizontal angle (radians)
-  phi = Math.PI / 6  // vertical angle (radians, 0 = top, PI = bottom)
+  phi = Math.PI / 6  // vertical angle (radians, 0 = horizon, +PI/2 = above)
   radius = 10
 
   // Target (orbit center)
