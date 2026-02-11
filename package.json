@@ -26,7 +26,8 @@
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "buntest": "bun test",
-    "all": "bun run lint && bun run format:check && bun run buntest && bun run typecheck"
+    "all": "bun run lint && bun run format:check && bun run buntest && bun run typecheck",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.18",
@@ -36,6 +37,7 @@
     "@typescript/native-preview": "^7.0.0-dev.20260206.1",
     "@webgpu/types": "^0.1.69",
     "babel-plugin-react-compiler": "1.0.0",
+    "husky": "9.1.7",
     "next": "16.1.2",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
