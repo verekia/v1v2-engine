@@ -1,7 +1,6 @@
 import {
   Scene,
   Mesh,
-  InputManager,
   createRenderer,
   OrbitControls,
   loadGlb,
@@ -86,7 +85,14 @@ type GeoReg =
 export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Persistent state (survives backend switches) ───────────────────
   const scene = new Scene()
-  const input = new InputManager()
+  const keys = new Set<string>()
+  window.addEventListener('keydown', e => {
+    if ('KeyW KeyA KeyS KeyD'.includes(e.code)) {
+      e.preventDefault()
+      keys.add(e.code)
+    }
+  })
+  window.addEventListener('keyup', e => keys.delete(e.code))
   const geoRegs: GeoReg[] = []
   const webgpuAvailable = !!navigator.gpu
 
@@ -385,10 +391,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     // ── Input ───────────────────────────────────────────────────────
     if (player) {
-      if (input.isDown('KeyW')) player.position[1]! += MOVE_SPEED * dt
-      if (input.isDown('KeyS')) player.position[1]! -= MOVE_SPEED * dt
-      if (input.isDown('KeyA')) player.position[0]! -= MOVE_SPEED * dt
-      if (input.isDown('KeyD')) player.position[0]! += MOVE_SPEED * dt
+      if (keys.has('KeyW')) player.position[1]! += MOVE_SPEED * dt
+      if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
+      if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
+      if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
     }
 
     // ── Rotate transparent cubes ─────────────────────────────────
