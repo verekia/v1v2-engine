@@ -1,5 +1,11 @@
-import { m4Multiply, m4Perspective, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
-import { lambertShader, skinnedLambertShader } from './shaders.ts'
+import { m4Multiply, m4Perspective, m4Ortho, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
+import {
+  lambertShader,
+  skinnedLambertShader,
+  unlitShader,
+  shadowDepthShader,
+  skinnedShadowDepthShader,
+} from './shaders.ts'
 
 import type { SkinInstance } from './skin.ts'
 
@@ -7,6 +13,8 @@ const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
 const MAX_SKINNED_ENTITIES = 64
+const SHADOW_MAP_SIZE = 2048
+const MSAA_SAMPLES = 4
 
 export type BackendType = 'webgpu' | 'webgl'
 
@@ -14,6 +22,16 @@ export interface IRenderer {
   readonly backendType: BackendType
   drawCalls: number
   perspective(out: Float32Array, o: number, fovY: number, aspect: number, near: number, far: number): void
+  ortho(
+    out: Float32Array,
+    o: number,
+    left: number,
+    right: number,
+    bottom: number,
+    top: number,
+    near: number,
+    far: number,
+  ): void
   registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array): void
   registerSkinnedGeometry(
     id: number,
@@ -38,13 +56,19 @@ export interface RenderScene {
   entityCount: number
   renderMask: Uint8Array
   skinnedMask: Uint8Array
+  unlitMask: Uint8Array
   positions: Float32Array
   scales: Float32Array
   worldMatrices: Float32Array
   colors: Float32Array
+  alphas: Float32Array
   geometryIds: Uint8Array
   skinInstanceIds: Int16Array
   skinInstances: SkinInstance[]
+  shadowLightViewProj?: Float32Array
+  shadowMapSize?: number
+  shadowBias?: number
+  shadowNormalBias?: number
 }
 
 interface GeometryGPU {
@@ -66,8 +90,22 @@ export class Renderer implements IRenderer {
   private context: GPUCanvasContext
   private pipeline: GPURenderPipeline
   private skinnedPipeline: GPURenderPipeline
+  private unlitPipeline: GPURenderPipeline
+  private transparentPipeline: GPURenderPipeline
+  private transparentSkinnedPipeline: GPURenderPipeline
   private depthTexture: GPUTexture
   private depthView: GPUTextureView
+  private msaaTexture: GPUTexture
+  private msaaView: GPUTextureView
+  private canvasFormat: GPUTextureFormat
+
+  // Shadow
+  private shadowPipeline: GPURenderPipeline
+  private shadowSkinnedPipeline: GPURenderPipeline
+  private shadowMapTexture: GPUTexture
+  private shadowMapView: GPUTextureView
+  private shadowCameraBuffer: GPUBuffer
+  private shadowCameraBG: GPUBindGroup
 
   // Buffers
   private cameraBuffer: GPUBuffer
@@ -77,7 +115,8 @@ export class Renderer implements IRenderer {
 
   // Bind groups
   private cameraBG: GPUBindGroup
-  private lightingBG: GPUBindGroup
+  private lightingBG!: GPUBindGroup
+  private lightingBGL: GPUBindGroupLayout
   private modelBGL: GPUBindGroupLayout
   private modelBG: GPUBindGroup
   private jointBG: GPUBindGroup
@@ -91,6 +130,9 @@ export class Renderer implements IRenderer {
   // Scratch buffers (no per-frame allocation)
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24) // 6 planes × 4 floats
+  private lightData = new Float32Array(32) // 128 bytes for lighting UBO
+  private _tpOrder: number[] = []
+  private _tpDist: Float32Array
 
   constructor(
     device: GPUDevice,
@@ -101,11 +143,16 @@ export class Renderer implements IRenderer {
   ) {
     this.device = device
     this.context = context
+    this.canvasFormat = format
     this.maxEntities = maxEntities
+    this._tpDist = new Float32Array(maxEntities)
 
     // ── Shader modules ─────────────────────────────────────────────
     const shaderModule = device.createShaderModule({ code: lambertShader })
     const skinnedShaderModule = device.createShaderModule({ code: skinnedLambertShader })
+    const unlitShaderModule = device.createShaderModule({ code: unlitShader })
+    const shadowShaderModule = device.createShaderModule({ code: shadowDepthShader })
+    const skinnedShadowShaderModule = device.createShaderModule({ code: skinnedShadowDepthShader })
 
     // ── Bind group layouts ────────────────────────────────────────────
     const cameraBGL = device.createBindGroupLayout({
@@ -120,8 +167,12 @@ export class Renderer implements IRenderer {
         },
       ],
     })
-    const lightingBGL = device.createBindGroupLayout({
-      entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+    this.lightingBGL = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+      ],
     })
     const jointBGL = device.createBindGroupLayout({
       entries: [
@@ -134,10 +185,54 @@ export class Renderer implements IRenderer {
     })
 
     const pipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [cameraBGL, this.modelBGL, lightingBGL],
+      bindGroupLayouts: [cameraBGL, this.modelBGL, this.lightingBGL],
     })
     const skinnedPipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [cameraBGL, this.modelBGL, lightingBGL, jointBGL],
+      bindGroupLayouts: [cameraBGL, this.modelBGL, this.lightingBGL, jointBGL],
+    })
+
+    // Shadow pipeline layouts (minimal — no lighting group)
+    const shadowPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [cameraBGL, this.modelBGL],
+    })
+    const shadowSkinnedPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [cameraBGL, this.modelBGL, jointBGL],
+    })
+
+    // Unlit pipeline layout (camera + model only, no lighting)
+    const unlitPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [cameraBGL, this.modelBGL],
+    })
+
+    // ── Unlit pipeline ──────────────────────────────────────────────
+    this.unlitPipeline = device.createRenderPipeline({
+      layout: unlitPipelineLayout,
+      vertex: {
+        module: unlitShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: unlitShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: true,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
     })
 
     // ── Static pipeline ────────────────────────────────────────────
@@ -168,6 +263,7 @@ export class Renderer implements IRenderer {
         depthCompare: 'less',
       },
       primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
     })
 
     // ── Skinned pipeline ───────────────────────────────────────────
@@ -205,11 +301,151 @@ export class Renderer implements IRenderer {
         depthCompare: 'less',
       },
       primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
     })
 
-    // ── Depth texture ─────────────────────────────────────────────────
+    // ── Transparent pipelines ─────────────────────────────────────────
+    const alphaBlend: GPUBlendState = {
+      color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+    }
+
+    this.transparentPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs',
+        targets: [{ format, blend: alphaBlend }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.transparentSkinnedPipeline = device.createRenderPipeline({
+      layout: skinnedPipelineLayout,
+      vertex: {
+        module: skinnedShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: skinnedShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format, blend: alphaBlend }],
+      },
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    // ── Shadow pipelines ──────────────────────────────────────────────
+    const shadowDepthStencil: GPUDepthStencilState = {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'less',
+      depthBias: 1,
+      depthBiasSlopeScale: 1,
+    }
+
+    this.shadowPipeline = device.createRenderPipeline({
+      layout: shadowPipelineLayout,
+      vertex: {
+        module: shadowShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position only
+            ],
+          },
+        ],
+      },
+      depthStencil: shadowDepthStencil,
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+    })
+
+    this.shadowSkinnedPipeline = device.createRenderPipeline({
+      layout: shadowSkinnedPipelineLayout,
+      vertex: {
+        module: skinnedShadowShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+          },
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      depthStencil: shadowDepthStencil,
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+    })
+
+    // ── MSAA + Depth textures ──────────────────────────────────────────
+    this.msaaTexture = this.createMsaaTexture(canvas.width, canvas.height)
+    this.msaaView = this.msaaTexture.createView()
     this.depthTexture = this.createDepthTexture(canvas.width, canvas.height)
     this.depthView = this.depthTexture.createView()
+
+    // ── Shadow map texture ────────────────────────────────────────────
+    this.shadowMapTexture = device.createTexture({
+      size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+      format: 'depth32float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    this.shadowMapView = this.shadowMapTexture.createView()
+
+    const shadowSampler = device.createSampler({
+      compare: 'less',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
 
     // ── Uniform buffers ───────────────────────────────────────────────
     // Camera: 2 mat4 = 128 bytes
@@ -222,15 +458,20 @@ export class Renderer implements IRenderer {
       size: MODEL_SLOT_SIZE * maxEntities,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    // Lighting: 3 vec4 = 48 bytes
+    // Lighting: 128 bytes (direction + dirColor + ambient + lightVP + shadowParams)
     this.lightingBuffer = device.createBuffer({
-      size: 48,
+      size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     // Joint matrices storage buffer
     this.jointBuffer = device.createBuffer({
       size: JOINT_SLOT_SIZE * MAX_SKINNED_ENTITIES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    // Shadow camera: 1 mat4 VP = 128 bytes (same layout as camera: view + proj, but we pack VP into view slot)
+    this.shadowCameraBuffer = device.createBuffer({
+      size: 128,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
     // ── Bind groups ───────────────────────────────────────────────────
@@ -243,12 +484,29 @@ export class Renderer implements IRenderer {
       entries: [{ binding: 0, resource: { buffer: this.modelBuffer, size: MODEL_SLOT_SIZE } }],
     })
     this.lightingBG = device.createBindGroup({
-      layout: lightingBGL,
-      entries: [{ binding: 0, resource: { buffer: this.lightingBuffer } }],
+      layout: this.lightingBGL,
+      entries: [
+        { binding: 0, resource: { buffer: this.lightingBuffer } },
+        { binding: 1, resource: this.shadowMapView },
+        { binding: 2, resource: shadowSampler },
+      ],
     })
     this.jointBG = device.createBindGroup({
       layout: jointBGL,
       entries: [{ binding: 0, resource: { buffer: this.jointBuffer, size: JOINT_SLOT_SIZE } }],
+    })
+    this.shadowCameraBG = device.createBindGroup({
+      layout: cameraBGL,
+      entries: [{ binding: 0, resource: { buffer: this.shadowCameraBuffer } }],
+    })
+  }
+
+  private createMsaaTexture(w: number, h: number): GPUTexture {
+    return this.device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      sampleCount: MSAA_SAMPLES,
     })
   }
 
@@ -257,6 +515,7 @@ export class Renderer implements IRenderer {
       size: [w, h],
       format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      sampleCount: MSAA_SAMPLES,
     })
   }
 
@@ -264,7 +523,23 @@ export class Renderer implements IRenderer {
     m4Perspective(out, o, fovY, aspect, near, far)
   }
 
+  ortho(
+    out: Float32Array,
+    o: number,
+    left: number,
+    right: number,
+    bottom: number,
+    top: number,
+    near: number,
+    far: number,
+  ): void {
+    m4Ortho(out, o, left, right, bottom, top, near, far)
+  }
+
   resize(w: number, h: number): void {
+    this.msaaTexture.destroy()
+    this.msaaTexture = this.createMsaaTexture(w, h)
+    this.msaaView = this.msaaTexture.createView()
     this.depthTexture.destroy()
     this.depthTexture = this.createDepthTexture(w, h)
     this.depthView = this.depthTexture.createView()
@@ -399,12 +674,34 @@ export class Renderer implements IRenderer {
       64,
     )
 
-    // Upload lighting (direction: vec4, dirColor: vec4, ambient: vec4 = 48 bytes)
-    const lightData = new Float32Array(12)
-    lightData.set(scene.lightDirection, 0) // vec4 slot 0 (w=0)
-    lightData.set(scene.lightDirColor, 4) // vec4 slot 1 (w=0)
-    lightData.set(scene.lightAmbientColor, 8) // vec4 slot 2 (w=0)
-    device.queue.writeBuffer(this.lightingBuffer, 0, lightData)
+    // Upload lighting (128 bytes)
+    const lightData = this.lightData
+    lightData[0] = scene.lightDirection[0]!
+    lightData[1] = scene.lightDirection[1]!
+    lightData[2] = scene.lightDirection[2]!
+    lightData[3] = 0
+    lightData[4] = scene.lightDirColor[0]!
+    lightData[5] = scene.lightDirColor[1]!
+    lightData[6] = scene.lightDirColor[2]!
+    lightData[7] = 0
+    lightData[8] = scene.lightAmbientColor[0]!
+    lightData[9] = scene.lightAmbientColor[1]!
+    lightData[10] = scene.lightAmbientColor[2]!
+    lightData[11] = 0
+    // lightVP (mat4x4f at offset 12 floats = 48 bytes)
+    const hasShadow = !!scene.shadowLightViewProj
+    if (hasShadow) {
+      for (let i = 0; i < 16; i++) lightData[12 + i] = scene.shadowLightViewProj![i]!
+    } else {
+      for (let i = 0; i < 16; i++) lightData[12 + i] = 0
+    }
+    // shadowParams (vec4f at offset 28 floats = 112 bytes)
+    const mapSize = scene.shadowMapSize ?? SHADOW_MAP_SIZE
+    lightData[28] = scene.shadowBias ?? 0.001 // bias
+    lightData[29] = scene.shadowNormalBias ?? 0.05 // normal offset bias
+    lightData[30] = 1.0 / mapSize // texelSize
+    lightData[31] = hasShadow ? 1.0 : 0.0 // enabled
+    device.queue.writeBuffer(this.lightingBuffer, 0, lightData.buffer as ArrayBuffer, lightData.byteOffset, 128)
 
     // ── Frustum culling setup ───────────────────────────────────────────
     // VP = projection * view
@@ -412,25 +709,10 @@ export class Renderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
-    // Upload per-entity model data (only visible entities)
+    // Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
     const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
-
-      // Frustum cull: bounding sphere in world space
-      const isSkinned = !!scene.skinnedMask[i]
-      const geo = isSkinned
-        ? this.skinnedGeometries.get(scene.geometryIds[i]!)
-        : this.geometries.get(scene.geometryIds[i]!)
-      if (!geo) continue
-      const si = i * 3
-      const sx = Math.abs(scene.scales[si]!)
-      const sy = Math.abs(scene.scales[si + 1]!)
-      const sz = Math.abs(scene.scales[si + 2]!)
-      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
-      const r = geo.boundingRadius * maxScale
-      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
-        continue
 
       // worldMatrix (16 floats = 64 bytes)
       for (let j = 0; j < 16; j++) modelSlot[j] = scene.worldMatrices[i * 16 + j]!
@@ -438,7 +720,7 @@ export class Renderer implements IRenderer {
       modelSlot[16] = scene.colors[i * 3]!
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
-      modelSlot[19] = 1.0
+      modelSlot[19] = scene.alphas[i]!
       device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 20)
     }
 
@@ -463,12 +745,81 @@ export class Renderer implements IRenderer {
       skinnedSlot++
     }
 
-    // ── Render pass ───────────────────────────────────────────────────
     const encoder = device.createCommandEncoder()
+
+    // ── Shadow depth pass ──────────────────────────────────────────────
+    if (hasShadow) {
+      // Upload shadow camera (light VP into view slot, identity into proj slot)
+      // Shadow depth shaders use camera.projection * camera.view * worldPos
+      // We store identity in projection and lightVP in view, so result = I * lightVP * worldPos = lightVP * worldPos
+      const shadowCamData = new Float32Array(32)
+      for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
+      // Identity matrix for projection
+      shadowCamData[16] = 1
+      shadowCamData[21] = 1
+      shadowCamData[26] = 1
+      shadowCamData[31] = 1
+      device.queue.writeBuffer(this.shadowCameraBuffer, 0, shadowCamData.buffer as ArrayBuffer, 0, 128)
+
+      const shadowPass = encoder.beginRenderPass({
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: this.shadowMapView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store',
+        },
+      })
+
+      // Static shadow casters
+      shadowPass.setPipeline(this.shadowPipeline)
+      shadowPass.setBindGroup(0, this.shadowCameraBG)
+
+      for (let i = 0; i < scene.entityCount; i++) {
+        if (!scene.renderMask[i]) continue
+        if (scene.skinnedMask[i]) continue
+        if (scene.unlitMask[i]) continue
+        if (scene.alphas[i]! < 1.0) continue
+        const geo = this.geometries.get(scene.geometryIds[i]!)
+        if (!geo) continue
+
+        shadowPass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+        shadowPass.setVertexBuffer(0, geo.vertexBuffer)
+        shadowPass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+        shadowPass.drawIndexed(geo.indexCount)
+      }
+
+      // Skinned shadow casters
+      if (skinnedSlotMap.size > 0) {
+        shadowPass.setPipeline(this.shadowSkinnedPipeline)
+        shadowPass.setBindGroup(0, this.shadowCameraBG)
+
+        for (let i = 0; i < scene.entityCount; i++) {
+          if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+          if (scene.alphas[i]! < 1.0) continue
+          const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
+          if (!geo) continue
+          const slot = skinnedSlotMap.get(i)
+          if (slot === undefined) continue
+
+          shadowPass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+          shadowPass.setBindGroup(2, this.jointBG, [slot * JOINT_SLOT_SIZE])
+          shadowPass.setVertexBuffer(0, geo.vertexBuffer)
+          shadowPass.setVertexBuffer(1, geo.skinBuffer)
+          shadowPass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+          shadowPass.drawIndexed(geo.indexCount)
+        }
+      }
+
+      shadowPass.end()
+    }
+
+    // ── Main render pass ───────────────────────────────────────────────
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
+          view: this.msaaView,
+          resolveTarget: this.context.getCurrentTexture().createView(),
           clearValue: { r: 0.15, g: 0.15, b: 0.2, a: 1 },
           loadOp: 'clear',
           storeOp: 'store',
@@ -484,18 +835,16 @@ export class Renderer implements IRenderer {
 
     let draws = 0
 
-    // ── Static draw pass ──────────────────────────────────────────────
-    pass.setPipeline(this.pipeline)
+    // ── Unlit draw pass ───────────────────────────────────────────────
+    pass.setPipeline(this.unlitPipeline)
     pass.setBindGroup(0, this.cameraBG)
-    pass.setBindGroup(2, this.lightingBG)
 
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
-      if (scene.skinnedMask[i]) continue // skip skinned in static pass
+      if (!scene.unlitMask[i]) continue
       const geo = this.geometries.get(scene.geometryIds[i]!)
       if (!geo) continue
 
-      // Frustum cull (same test as above)
       const si = i * 3
       const sx = Math.abs(scene.scales[si]!)
       const sy = Math.abs(scene.scales[si + 1]!)
@@ -512,7 +861,36 @@ export class Renderer implements IRenderer {
       draws++
     }
 
-    // ── Skinned draw pass ─────────────────────────────────────────────
+    // ── Opaque static draw pass ───────────────────────────────────────
+    pass.setPipeline(this.pipeline)
+    pass.setBindGroup(0, this.cameraBG)
+    pass.setBindGroup(2, this.lightingBG)
+
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
+      if (scene.skinnedMask[i]) continue
+      if (scene.unlitMask[i]) continue
+      if (scene.alphas[i]! < 1.0) continue // defer transparent
+      const geo = this.geometries.get(scene.geometryIds[i]!)
+      if (!geo) continue
+
+      const si = i * 3
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
+      const r = geo.boundingRadius * maxScale
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
+
+      pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+      pass.setVertexBuffer(0, geo.vertexBuffer)
+      pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+      pass.drawIndexed(geo.indexCount)
+      draws++
+    }
+
+    // ── Opaque skinned draw pass ──────────────────────────────────────
     if (skinnedSlotMap.size > 0) {
       pass.setPipeline(this.skinnedPipeline)
       pass.setBindGroup(0, this.cameraBG)
@@ -520,12 +898,12 @@ export class Renderer implements IRenderer {
 
       for (let i = 0; i < scene.entityCount; i++) {
         if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+        if (scene.alphas[i]! < 1.0) continue
         const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
         if (!geo) continue
         const slot = skinnedSlotMap.get(i)
         if (slot === undefined) continue
 
-        // Frustum cull
         const si = i * 3
         const sx = Math.abs(scene.scales[si]!)
         const sy = Math.abs(scene.scales[si + 1]!)
@@ -543,6 +921,83 @@ export class Renderer implements IRenderer {
         pass.drawIndexed(geo.indexCount)
         draws++
       }
+    }
+
+    // ── Transparent pass (sorted back-to-front) ────────────────────────
+    // Extract camera eye from view matrix (column-major)
+    const vo = scene.cameraViewOffset
+    const vm = scene.cameraView
+    const tx = vm[vo + 12]!,
+      ty = vm[vo + 13]!,
+      tz = vm[vo + 14]!
+    const camX = -(vm[vo]! * tx + vm[vo + 1]! * ty + vm[vo + 2]! * tz)
+    const camY = -(vm[vo + 4]! * tx + vm[vo + 5]! * ty + vm[vo + 6]! * tz)
+    const camZ = -(vm[vo + 8]! * tx + vm[vo + 9]! * ty + vm[vo + 10]! * tz)
+
+    const tpOrder = this._tpOrder
+    const tpDist = this._tpDist
+    tpOrder.length = 0
+
+    for (let i = 0; i < scene.entityCount; i++) {
+      if (!scene.renderMask[i]) continue
+      if (scene.alphas[i]! >= 1.0) continue
+      const isSkinned = !!scene.skinnedMask[i]
+      const geo = isSkinned
+        ? this.skinnedGeometries.get(scene.geometryIds[i]!)
+        : this.geometries.get(scene.geometryIds[i]!)
+      if (!geo) continue
+
+      const si = i * 3
+      const sx = Math.abs(scene.scales[si]!)
+      const sy = Math.abs(scene.scales[si + 1]!)
+      const sz = Math.abs(scene.scales[si + 2]!)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
+      const r = geo.boundingRadius * maxScale
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
+
+      const dx = scene.positions[si]! - camX
+      const dy = scene.positions[si + 1]! - camY
+      const dz = scene.positions[si + 2]! - camZ
+      tpDist[i] = dx * dx + dy * dy + dz * dz
+      tpOrder.push(i)
+    }
+
+    tpOrder.sort((a, b) => tpDist[b]! - tpDist[a]!)
+
+    let curSkinned = -1 // -1=unset, 0=static, 1=skinned
+    for (const i of tpOrder) {
+      const isSkinned = !!scene.skinnedMask[i]
+      if (isSkinned) {
+        if (curSkinned !== 1) {
+          pass.setPipeline(this.transparentSkinnedPipeline)
+          pass.setBindGroup(0, this.cameraBG)
+          pass.setBindGroup(2, this.lightingBG)
+          curSkinned = 1
+        }
+        const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)!
+        const slot = skinnedSlotMap.get(i)
+        if (slot === undefined) continue
+        pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+        pass.setBindGroup(3, this.jointBG, [slot * JOINT_SLOT_SIZE])
+        pass.setVertexBuffer(0, geo.vertexBuffer)
+        pass.setVertexBuffer(1, geo.skinBuffer)
+        pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+        pass.drawIndexed(geo.indexCount)
+      } else {
+        if (curSkinned !== 0) {
+          pass.setPipeline(this.transparentPipeline)
+          pass.setBindGroup(0, this.cameraBG)
+          pass.setBindGroup(2, this.lightingBG)
+          curSkinned = 0
+        }
+        const geo = this.geometries.get(scene.geometryIds[i]!)!
+        pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+        pass.setVertexBuffer(0, geo.vertexBuffer)
+        pass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+        pass.drawIndexed(geo.indexCount)
+      }
+      draws++
     }
 
     this.drawCalls = draws
@@ -567,6 +1022,9 @@ export class Renderer implements IRenderer {
     this.modelBuffer.destroy()
     this.lightingBuffer.destroy()
     this.jointBuffer.destroy()
+    this.shadowCameraBuffer.destroy()
+    this.shadowMapTexture.destroy()
+    this.msaaTexture.destroy()
     this.depthTexture.destroy()
     this.device.destroy()
   }

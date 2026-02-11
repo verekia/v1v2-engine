@@ -1,4 +1,4 @@
-import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER, SKINNED } from './ecs/index.ts'
+import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER, SKINNED, UNLIT } from './ecs/index.ts'
 import { InputManager } from './ecs/index.ts'
 import {
   createRenderer,
@@ -7,20 +7,39 @@ import {
   createSkeleton,
   createSkinInstance,
   updateSkinInstance,
+  transitionTo,
   createSphereGeometry,
   mergeGeometries,
+  cubeVertices,
+  cubeIndices,
   m4FromTRS,
   m4LookAt,
+  m4Multiply,
+  v3Normalize,
+  v3Scale,
 } from './engine/index.ts'
 
 import type { BackendType, IRenderer, RenderScene, SkinInstance } from './engine/index.ts'
 
 const MOVE_SPEED = 3
-const SPHERE_GEO_ID = 1
 const MEGAXE_GEO_ID = 2
 const EDEN_GEO_START = 3
 const PLAYER_BODY_GEO_ID = 4
+const CUBE_GEO_ID = 5
+const SKY_GEO_ID = 6
 const UP = new Float32Array([0, 0, 1])
+
+// Shadow mapping — fixed volume covering the entire Eden map (0,0 to 200,200)
+const SHADOW_EXTENT = 150
+const SHADOW_NEAR = 1
+const SHADOW_FAR = 800
+const SHADOW_DISTANCE = 400
+const lightView = new Float32Array(16)
+const lightProj = new Float32Array(16)
+const lightVP = new Float32Array(16)
+const lightEye = new Float32Array(3)
+const lightTarget = new Float32Array([100, 100, 0])
+const lightDirNorm = new Float32Array(3)
 
 const EDEN_COLORS: Record<string, [number, number, number]> = {
   Eden_1: [0.78, 0.44, 0.25],
@@ -73,10 +92,19 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Mutable renderer state ─────────────────────────────────────────
   let currentCanvas = canvas
-  let renderer: IRenderer = await createRenderer(currentCanvas, 10000)
+  const savedBackend = localStorage.getItem('renderer-backend') as BackendType | null
+  let renderer: IRenderer = await createRenderer(currentCanvas, 10000, savedBackend ?? undefined)
   let orbit = new OrbitControls(currentCanvas)
+  orbit.targetX = 50
+  orbit.targetY = 80
+  orbit.targetZ = 0
+  orbit.theta = Math.PI
+  orbit.phi = Math.atan2(5, 10)
+  orbit.radius = Math.hypot(10, 5) * 1.5
+  orbit.updateEye()
   let aspect = currentCanvas.width / currentCanvas.height
   let resizeObs: ResizeObserver
+  let switching = false
 
   function trackGeo(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array) {
     renderer.registerGeometry(id, vertices, indices)
@@ -113,6 +141,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   async function switchBackend(type: BackendType) {
     if (renderer.backendType === type) return
+
+    switching = true
 
     // Save orbit state
     const { theta, phi, radius, targetX, targetY, targetZ } = orbit
@@ -151,17 +181,25 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     orbit.updateEye()
 
     observeResize()
+    switching = false
   }
 
   // ── Register geometries ─────────────────────────────────────────────
-  const sphere = createSphereGeometry(16, 24)
-  trackGeo(SPHERE_GEO_ID, sphere.vertices, sphere.indices)
+  trackGeo(CUBE_GEO_ID, cubeVertices, cubeIndices)
+  const skySphere = createSphereGeometry(16, 24, true)
+  trackGeo(SKY_GEO_ID, skySphere.vertices, skySphere.indices)
 
   // ── Camera entity ─────────────────────────────────────────────────
   const cam = world.createEntity()
-  world.addTransform(cam, { position: [0, -8, 3] })
-  world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 500 })
+  world.addTransform(cam, { position: [50, 70, 5] })
+  world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 5000 })
   world.activeCamera = cam
+
+  // ── Sky sphere ──────────────────────────────────────────────────────
+  const sky = world.createEntity()
+  world.addTransform(sky, { position: [50, 80, 0], scale: [1500, 1500, 1500] })
+  world.addMeshInstance(sky, { geometryId: SKY_GEO_ID, color: [85 / 255, 221 / 255, 1] })
+  world.addUnlit(sky)
 
   // ── Load static GLB (megaxe + Eden) ───────────────────────────────
   const megaxeColors = new Map<number, [number, number, number]>([
@@ -174,7 +212,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   if (megaxe) {
     trackGeo(MEGAXE_GEO_ID, megaxe.vertices, megaxe.indices)
     const axe = world.createEntity()
-    world.addTransform(axe, { position: [3, 0, 0], scale: megaxe.scale })
+    world.addTransform(axe, { position: [44, 80, 0], scale: megaxe.scale })
     world.addMeshInstance(axe, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
   }
 
@@ -190,12 +228,13 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     )
     trackGeo(EDEN_GEO_START, merged.vertices, merged.indices)
     const eden = world.createEntity()
-    world.addTransform(eden, { position: [-30, 0, 0], scale: edenMeshes[0]!.scale })
+    world.addTransform(eden, { position: [0, 0, 0], scale: edenMeshes[0]!.scale })
     world.addMeshInstance(eden, { geometryId: EDEN_GEO_START, color: [1, 1, 1] })
   }
 
   // ── Load player GLB ───────────────────────────────────────────────
   const skinInstances: SkinInstance[] = []
+  const animCycleCallbacks: ((dt: number) => void)[] = []
   const playerResult = await loadGlb('/player-bundle.glb')
   const bodyMesh = playerResult.meshes.find(m => m.name === 'Body' && m.skinIndex !== undefined)
 
@@ -205,47 +244,63 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     const skin = playerResult.skins[bodyMesh.skinIndex]!
     const skeleton = createSkeleton(skin, playerResult.nodeTransforms)
 
-    // Find "Run" animation
-    let runClipIdx = 0
-    for (let i = 0; i < playerResult.animations.length; i++) {
-      if (playerResult.animations[i]!.name.toLowerCase().includes('run')) {
-        runClipIdx = i
-        break
-      }
+    // Build animation name → index map
+    const animNames = ['Idle', 'Jump', 'Run', 'SlashRight']
+    const animIndices: number[] = []
+    for (const name of animNames) {
+      const idx = playerResult.animations.findIndex(a => a.name.toLowerCase().includes(name.toLowerCase()))
+      animIndices.push(idx >= 0 ? idx : 0)
     }
 
-    const skinInst = createSkinInstance(skeleton, runClipIdx)
+    const skinInst = createSkinInstance(skeleton, animIndices[0]!)
+    updateSkinInstance(skinInst, playerResult.animations, 0) // compute initial joint matrices
     skinInstances.push(skinInst)
 
     // Player entity (replaces the cube)
     const player = world.createEntity()
-    world.addTransform(player, { position: [0, 0, 0], scale: bodyMesh.scale })
+    world.addTransform(player, { position: [42, 80, 0], scale: bodyMesh.scale })
     world.addMeshInstance(player, { geometryId: PLAYER_BODY_GEO_ID, color: [1, 1, 1] })
     world.addSkinned(player, 0)
     world.addInputReceiver(player)
+
+    // Cycle through animations every second with 0.2s crossfade
+    let animCycleIndex = 0
+    let animTimer = 0
+    const ANIM_INTERVAL = 1.0
+    const BLEND_DURATION = 0.2
+    animCycleCallbacks.push((dt: number) => {
+      animTimer += dt
+      if (animTimer >= ANIM_INTERVAL) {
+        animTimer -= ANIM_INTERVAL
+        animCycleIndex = (animCycleIndex + 1) % animIndices.length
+        transitionTo(skinInst, animIndices[animCycleIndex]!, BLEND_DURATION)
+      }
+    })
   }
 
-  // ── Sphere entities (behind the player, positive Y) ──────────────
-  const SPHERE_COLS = 7
-  const SPHERE_ROWS = 5
-  const SPACING = 2.5
-  for (let row = 0; row < SPHERE_ROWS; row++) {
-    for (let col = 0; col < SPHERE_COLS; col++) {
-      const s = world.createEntity()
-      const x = (col - (SPHERE_COLS - 1) / 2) * SPACING
-      const z = (row - (SPHERE_ROWS - 1) / 2) * SPACING
-      world.addTransform(s, { position: [x, 8, z], scale: [0.8, 0.8, 0.8] })
-      // Vary color by position
-      const r = 0.3 + (col / (SPHERE_COLS - 1)) * 0.5
-      const g = 0.3 + (row / (SPHERE_ROWS - 1)) * 0.5
-      const b = 0.6
-      world.addMeshInstance(s, { geometryId: SPHERE_GEO_ID, color: [r, g, b] })
-    }
+  // ── Transparent cubes ───────────────────────────────────────────
+  const CUBE_COUNT = 5
+  const cubeColors: [number, number, number][] = [
+    [1, 0.2, 0.2],
+    [0.2, 0.8, 0.2],
+    [0.3, 0.4, 1],
+    [1, 0.8, 0.1],
+    [0.9, 0.3, 0.9],
+  ]
+  const cubeEntities: number[] = []
+  for (let i = 0; i < CUBE_COUNT; i++) {
+    const cube = world.createEntity()
+    const angle = (i / CUBE_COUNT) * Math.PI * 2
+    const x = 50 + Math.cos(angle) * 4
+    const y = 80 + Math.sin(angle) * 4
+    world.addTransform(cube, { position: [x, y, 3] })
+    world.addMeshInstance(cube, { geometryId: CUBE_GEO_ID, color: cubeColors[i]!, alpha: 0.5 })
+    cubeEntities.push(cube)
   }
 
   // ── Lighting ──────────────────────────────────────────────────────
-  world.setDirectionalLight([-1, -1, -1], [1, 1, 1])
-  world.setAmbientLight([0.4, 0.4, 0.4])
+  world.setDirectionalLight([-1, -1, -2.5], [0.3, 0.3, 0.3])
+  world.setAmbientLight([0.95, 0.95, 0.95])
 
   // ── Stats overlay ────────────────────────────────────────────────
   const stats = document.createElement('div')
@@ -282,8 +337,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     document.body.appendChild(toggle)
     checkbox.addEventListener('change', async () => {
       checkbox.disabled = true
+      const target: BackendType = checkbox.checked ? 'webgpu' : 'webgl'
       try {
-        await switchBackend(checkbox.checked ? 'webgpu' : 'webgl')
+        await switchBackend(target)
+        localStorage.setItem('renderer-backend', target)
       } catch {
         // Revert checkbox if switch failed
         checkbox.checked = renderer.backendType === 'webgpu'
@@ -299,6 +356,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const MAX_ENTITIES = 10_000
   const renderMask = new Uint8Array(MAX_ENTITIES)
   const skinnedMask = new Uint8Array(MAX_ENTITIES)
+  const unlitMask = new Uint8Array(MAX_ENTITIES)
   const meshMask = TRANSFORM | MESH_INSTANCE
 
   // ── Game loop ─────────────────────────────────────────────────────
@@ -307,6 +365,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const inputMask = TRANSFORM | INPUT_RECEIVER
 
   function loop(now: number) {
+    if (switching) {
+      requestAnimationFrame(loop)
+      return
+    }
     const dt = Math.min((now - lastTime) / 1000, 0.1) // cap delta
     lastTime = now
 
@@ -319,6 +381,14 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       if (input.isDown('KeyA')) world.positions[pi]! -= MOVE_SPEED * dt
       if (input.isDown('KeyD')) world.positions[pi]! += MOVE_SPEED * dt
     }
+
+    // ── Rotate transparent cubes ─────────────────────────────────
+    for (const e of cubeEntities) {
+      world.rotations[e * 3 + 2]! += dt
+    }
+
+    // ── Animation cycling ─────────────────────────────────────────
+    for (const cb of animCycleCallbacks) cb(dt)
 
     // ── Animation system ──────────────────────────────────────────
     for (const inst of skinInstances) {
@@ -338,11 +408,23 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       renderer.perspective(world.projMatrices, i * 16, world.fovs[i]!, aspect, world.nears[i]!, world.fars[i]!)
     }
 
+    // ── Shadow: compute light VP matrix ────────────────────────────
+    // Fixed center covering the Eden map — lightTarget is a constant
+    v3Normalize(lightDirNorm, 0, world.directionalLightDir, 0)
+    v3Scale(lightEye, 0, lightDirNorm, 0, -SHADOW_DISTANCE)
+    lightEye[0]! += lightTarget[0]!
+    lightEye[1]! += lightTarget[1]!
+    lightEye[2]! += lightTarget[2]!
+    m4LookAt(lightView, 0, lightEye, 0, lightTarget, 0, UP, 0)
+    renderer.ortho(lightProj, 0, -SHADOW_EXTENT, SHADOW_EXTENT, -SHADOW_EXTENT, SHADOW_EXTENT, SHADOW_NEAR, SHADOW_FAR)
+    m4Multiply(lightVP, 0, lightProj, 0, lightView, 0)
+
     // ── Build render masks ──────────────────────────────────────────
     for (let i = 0; i < world.entityCount; i++) {
       const mask = world.componentMask[i]!
       renderMask[i] = (mask & meshMask) === meshMask ? 1 : 0
       skinnedMask[i] = mask & SKINNED ? 1 : 0
+      unlitMask[i] = mask & UNLIT ? 1 : 0
     }
 
     // ── Render ────────────────────────────────────────────────────
@@ -358,13 +440,17 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       entityCount: world.entityCount,
       renderMask,
       skinnedMask,
+      unlitMask,
       positions: world.positions,
       scales: world.scales,
       worldMatrices: world.worldMatrices,
       colors: world.colors,
+      alphas: world.alphas,
       geometryIds: world.geometryIds,
       skinInstanceIds: world.skinInstanceIds,
       skinInstances,
+      shadowLightViewProj: lightVP,
+      shadowBias: 0.0001,
     }
     renderer.render(scene)
     frames++

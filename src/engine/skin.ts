@@ -9,6 +9,7 @@ export interface Skeleton {
   jointNodeIndices: number[]
   inverseBindMatrices: Float32Array
   nodeTransforms: GltfNodeTransform[]
+  traversalOrder: number[] // topological order: parents before children
 }
 
 export interface SkinInstance {
@@ -17,10 +18,20 @@ export interface SkinInstance {
   time: number
   speed: number
   loop: boolean
+  // Crossfade blending
+  prevClipIndex: number
+  prevTime: number
+  prevSpeed: number
+  prevLoop: boolean
+  blendDuration: number
+  blendElapsed: number
   // Pre-allocated scratch buffers
   localTranslations: Float32Array // nodeCount * 3
   localRotations: Float32Array // nodeCount * 4
   localScales: Float32Array // nodeCount * 3
+  prevLocalTranslations: Float32Array // nodeCount * 3 (blend source)
+  prevLocalRotations: Float32Array // nodeCount * 4 (blend source)
+  prevLocalScales: Float32Array // nodeCount * 3 (blend source)
   globalMatrices: Float32Array // nodeCount * 16
   jointMatrices: Float32Array // jointCount * 16
 }
@@ -30,11 +41,26 @@ const _tempMat = new Float32Array(16)
 const _localMat = new Float32Array(16)
 
 export function createSkeleton(skin: GltfSkin, nodeTransforms: GltfNodeTransform[]): Skeleton {
+  // Compute topological traversal order (parents before children)
+  // glTF doesn't guarantee parent nodes have lower indices than children
+  const nodeCount = nodeTransforms.length
+  const traversalOrder: number[] = []
+  const visited = new Uint8Array(nodeCount)
+  function visit(i: number) {
+    if (visited[i]) return
+    const parent = nodeTransforms[i]!.parentIndex
+    if (parent >= 0) visit(parent)
+    visited[i] = 1
+    traversalOrder.push(i)
+  }
+  for (let i = 0; i < nodeCount; i++) visit(i)
+
   return {
     jointCount: skin.jointNodeIndices.length,
     jointNodeIndices: skin.jointNodeIndices,
     inverseBindMatrices: skin.inverseBindMatrices,
     nodeTransforms,
+    traversalOrder,
   }
 }
 
@@ -43,6 +69,9 @@ export function createSkinInstance(skeleton: Skeleton, clipIndex: number): SkinI
   const localTranslations = new Float32Array(nodeCount * 3)
   const localRotations = new Float32Array(nodeCount * 4)
   const localScales = new Float32Array(nodeCount * 3)
+  const prevLocalTranslations = new Float32Array(nodeCount * 3)
+  const prevLocalRotations = new Float32Array(nodeCount * 4)
+  const prevLocalScales = new Float32Array(nodeCount * 3)
   const globalMatrices = new Float32Array(nodeCount * 16)
   const jointMatrices = new Float32Array(MAX_JOINTS * 16)
 
@@ -67,12 +96,37 @@ export function createSkinInstance(skeleton: Skeleton, clipIndex: number): SkinI
     time: 0,
     speed: 1,
     loop: true,
+    prevClipIndex: clipIndex,
+    prevTime: 0,
+    prevSpeed: 1,
+    prevLoop: true,
+    blendDuration: 0,
+    blendElapsed: 0,
     localTranslations,
     localRotations,
     localScales,
+    prevLocalTranslations,
+    prevLocalRotations,
+    prevLocalScales,
     globalMatrices,
     jointMatrices,
   }
+}
+
+export function transitionTo(inst: SkinInstance, newClipIndex: number, duration: number, loop = true): void {
+  if (inst.clipIndex === newClipIndex) return
+  // Save current clip as the "from" state
+  inst.prevClipIndex = inst.clipIndex
+  inst.prevTime = inst.time
+  inst.prevSpeed = inst.speed
+  inst.prevLoop = inst.loop
+  // Set up new clip
+  inst.clipIndex = newClipIndex
+  inst.time = 0
+  inst.loop = loop
+  // Start blend
+  inst.blendDuration = duration
+  inst.blendElapsed = 0
 }
 
 function binarySearchKeyframe(times: Float32Array, t: number): number {
@@ -88,35 +142,28 @@ function binarySearchKeyframe(times: Float32Array, t: number): number {
   return lo
 }
 
-export function updateSkinInstance(inst: SkinInstance, clips: GltfAnimation[], dt: number): void {
-  const clip = clips[inst.clipIndex]!
-  const skeleton = inst.skeleton
-
-  // Advance time
-  inst.time += dt * inst.speed
-  if (inst.loop) {
-    if (clip.duration > 0) {
-      inst.time = inst.time % clip.duration
-    }
-  } else {
-    if (inst.time > clip.duration) inst.time = clip.duration
-  }
-  const t = inst.time
-
-  // Reset local transforms to rest pose
+function sampleClip(
+  clip: GltfAnimation,
+  t: number,
+  skeleton: Skeleton,
+  outTranslations: Float32Array,
+  outRotations: Float32Array,
+  outScales: Float32Array,
+): void {
+  // Reset to rest pose
   const nodeCount = skeleton.nodeTransforms.length
   for (let i = 0; i < nodeCount; i++) {
     const nt = skeleton.nodeTransforms[i]!
-    inst.localTranslations[i * 3] = nt.translation[0]!
-    inst.localTranslations[i * 3 + 1] = nt.translation[1]!
-    inst.localTranslations[i * 3 + 2] = nt.translation[2]!
-    inst.localRotations[i * 4] = nt.rotation[0]!
-    inst.localRotations[i * 4 + 1] = nt.rotation[1]!
-    inst.localRotations[i * 4 + 2] = nt.rotation[2]!
-    inst.localRotations[i * 4 + 3] = nt.rotation[3]!
-    inst.localScales[i * 3] = nt.scale[0]!
-    inst.localScales[i * 3 + 1] = nt.scale[1]!
-    inst.localScales[i * 3 + 2] = nt.scale[2]!
+    outTranslations[i * 3] = nt.translation[0]!
+    outTranslations[i * 3 + 1] = nt.translation[1]!
+    outTranslations[i * 3 + 2] = nt.translation[2]!
+    outRotations[i * 4] = nt.rotation[0]!
+    outRotations[i * 4 + 1] = nt.rotation[1]!
+    outRotations[i * 4 + 2] = nt.rotation[2]!
+    outRotations[i * 4 + 3] = nt.rotation[3]!
+    outScales[i * 3] = nt.scale[0]!
+    outScales[i * 3 + 1] = nt.scale[1]!
+    outScales[i * 3 + 2] = nt.scale[2]!
   }
 
   // Sample each animation channel
@@ -135,38 +182,95 @@ export function updateSkinInstance(inst: SkinInstance, clips: GltfAnimation[], d
       const o0 = ki * 3
       const o1 = (ki + 1) * 3
       if (t1 !== undefined) {
-        v3Lerp(inst.localTranslations, ni * 3, vals, o0, vals, o1, frac)
+        v3Lerp(outTranslations, ni * 3, vals, o0, vals, o1, frac)
       } else {
-        inst.localTranslations[ni * 3] = vals[o0]!
-        inst.localTranslations[ni * 3 + 1] = vals[o0 + 1]!
-        inst.localTranslations[ni * 3 + 2] = vals[o0 + 2]!
+        outTranslations[ni * 3] = vals[o0]!
+        outTranslations[ni * 3 + 1] = vals[o0 + 1]!
+        outTranslations[ni * 3 + 2] = vals[o0 + 2]!
       }
     } else if (ch.path === 'rotation') {
       const o0 = ki * 4
       const o1 = (ki + 1) * 4
       if (t1 !== undefined) {
-        quatSlerp(inst.localRotations, ni * 4, vals, o0, vals, o1, frac)
+        quatSlerp(outRotations, ni * 4, vals, o0, vals, o1, frac)
       } else {
-        inst.localRotations[ni * 4] = vals[o0]!
-        inst.localRotations[ni * 4 + 1] = vals[o0 + 1]!
-        inst.localRotations[ni * 4 + 2] = vals[o0 + 2]!
-        inst.localRotations[ni * 4 + 3] = vals[o0 + 3]!
+        outRotations[ni * 4] = vals[o0]!
+        outRotations[ni * 4 + 1] = vals[o0 + 1]!
+        outRotations[ni * 4 + 2] = vals[o0 + 2]!
+        outRotations[ni * 4 + 3] = vals[o0 + 3]!
       }
     } else if (ch.path === 'scale') {
       const o0 = ki * 3
       const o1 = (ki + 1) * 3
       if (t1 !== undefined) {
-        v3Lerp(inst.localScales, ni * 3, vals, o0, vals, o1, frac)
+        v3Lerp(outScales, ni * 3, vals, o0, vals, o1, frac)
       } else {
-        inst.localScales[ni * 3] = vals[o0]!
-        inst.localScales[ni * 3 + 1] = vals[o0 + 1]!
-        inst.localScales[ni * 3 + 2] = vals[o0 + 2]!
+        outScales[ni * 3] = vals[o0]!
+        outScales[ni * 3 + 1] = vals[o0 + 1]!
+        outScales[ni * 3 + 2] = vals[o0 + 2]!
       }
     }
   }
+}
 
-  // Compute global matrices parent-first (nodes are already in order from glTF)
-  for (let i = 0; i < nodeCount; i++) {
+function advanceTime(time: number, dt: number, speed: number, loop: boolean, duration: number): number {
+  time += dt * speed
+  if (loop) {
+    if (duration > 0) time = time % duration
+  } else {
+    if (time > duration) time = duration
+  }
+  return time
+}
+
+export function updateSkinInstance(inst: SkinInstance, clips: GltfAnimation[], dt: number): void {
+  const clip = clips[inst.clipIndex]!
+  const skeleton = inst.skeleton
+  const nodeCount = skeleton.nodeTransforms.length
+  const blending = inst.blendDuration > 0 && inst.blendElapsed < inst.blendDuration
+
+  // Advance current clip time
+  inst.time = advanceTime(inst.time, dt, inst.speed, inst.loop, clip.duration)
+
+  // Sample current clip into localTranslations/Rotations/Scales
+  sampleClip(clip, inst.time, skeleton, inst.localTranslations, inst.localRotations, inst.localScales)
+
+  if (blending) {
+    const prevClip = clips[inst.prevClipIndex]!
+
+    // Advance previous clip time
+    inst.prevTime = advanceTime(inst.prevTime, dt, inst.prevSpeed, inst.prevLoop, prevClip.duration)
+
+    // Sample previous clip into prev buffers
+    sampleClip(
+      prevClip,
+      inst.prevTime,
+      skeleton,
+      inst.prevLocalTranslations,
+      inst.prevLocalRotations,
+      inst.prevLocalScales,
+    )
+
+    // Advance blend
+    inst.blendElapsed += dt
+    let alpha = inst.blendElapsed / inst.blendDuration
+    if (alpha >= 1) {
+      alpha = 1
+      inst.blendDuration = 0
+    }
+
+    // Blend: lerp translations and scales, slerp rotations (prev → current)
+    for (let i = 0; i < nodeCount; i++) {
+      v3Lerp(inst.localTranslations, i * 3, inst.prevLocalTranslations, i * 3, inst.localTranslations, i * 3, alpha)
+      quatSlerp(inst.localRotations, i * 4, inst.prevLocalRotations, i * 4, inst.localRotations, i * 4, alpha)
+      v3Lerp(inst.localScales, i * 3, inst.prevLocalScales, i * 3, inst.localScales, i * 3, alpha)
+    }
+  }
+
+  // Compute global matrices in topological order (parents before children)
+  const order = skeleton.traversalOrder
+  for (let k = 0; k < order.length; k++) {
+    const i = order[k]!
     const nt = skeleton.nodeTransforms[i]!
     m4FromQuatTRS(_localMat, 0, inst.localTranslations, i * 3, inst.localRotations, i * 4, inst.localScales, i * 3)
     if (nt.parentIndex >= 0) {

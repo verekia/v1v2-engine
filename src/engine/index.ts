@@ -5,10 +5,26 @@ export type { BackendType, IRenderer, RenderScene } from './renderer.ts'
 export { OrbitControls } from './orbit-controls.ts'
 export { loadGlb } from './gltf.ts'
 export type { GltfMesh, GltfSkin, GltfAnimation, GltfAnimationChannel, GltfNodeTransform, GlbResult } from './gltf.ts'
-export { createSkeleton, createSkinInstance, updateSkinInstance } from './skin.ts'
+export { createSkeleton, createSkinInstance, updateSkinInstance, transitionTo } from './skin.ts'
 export type { Skeleton, SkinInstance } from './skin.ts'
 export { cubeVertices, cubeIndices, createSphereGeometry, mergeGeometries } from './geometry.ts'
-export { lambertShader, skinnedLambertShader } from './shaders.ts'
+export {
+  lambertShader,
+  skinnedLambertShader,
+  unlitShader,
+  shadowDepthShader,
+  skinnedShadowDepthShader,
+} from './shaders.ts'
+export {
+  glLambertVS,
+  glLambertFS,
+  glUnlitVS,
+  glUnlitFS,
+  glSkinnedLambertVS,
+  glShadowDepthVS,
+  glSkinnedShadowDepthVS,
+  glShadowDepthFS,
+} from './webgl-shaders.ts'
 export {
   v3Set,
   v3Copy,
@@ -24,6 +40,8 @@ export {
   m4Multiply,
   m4Perspective,
   m4PerspectiveGL,
+  m4Ortho,
+  m4OrthoGL,
   m4LookAt,
   m4ExtractFrustumPlanes,
   m4FromTRS,

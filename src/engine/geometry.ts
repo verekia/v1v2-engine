@@ -49,9 +49,14 @@ export const cubeIndices = new Uint16Array([
 
 // ── Sphere (UV sphere) ───────────────────────────────────────────────
 
-export function createSphereGeometry(stacks = 16, slices = 24): { vertices: Float32Array; indices: Uint16Array } {
+export function createSphereGeometry(
+  stacks = 16,
+  slices = 24,
+  inverted = false,
+): { vertices: Float32Array; indices: Uint16Array } {
   const vertCount = (stacks + 1) * (slices + 1)
   const vertices = new Float32Array(vertCount * 9)
+  const sign = inverted ? -1 : 1
   let vi = 0
 
   for (let st = 0; st <= stacks; st++) {
@@ -67,10 +72,10 @@ export function createSphereGeometry(stacks = 16, slices = 24): { vertices: Floa
       vertices[vi++] = nx
       vertices[vi++] = ny
       vertices[vi++] = nz
-      // normal
-      vertices[vi++] = nx
-      vertices[vi++] = ny
-      vertices[vi++] = nz
+      // normal (flipped for inverted)
+      vertices[vi++] = nx * sign
+      vertices[vi++] = ny * sign
+      vertices[vi++] = nz * sign
       // color (white)
       vertices[vi++] = 1
       vertices[vi++] = 1
@@ -87,12 +92,21 @@ export function createSphereGeometry(stacks = 16, slices = 24): { vertices: Floa
     for (let sl = 0; sl < slices; sl++) {
       const a = st * row + sl
       const b = a + row
-      indices[ii++] = a
-      indices[ii++] = b
-      indices[ii++] = a + 1
-      indices[ii++] = a + 1
-      indices[ii++] = b
-      indices[ii++] = b + 1
+      if (inverted) {
+        indices[ii++] = a
+        indices[ii++] = a + 1
+        indices[ii++] = b
+        indices[ii++] = a + 1
+        indices[ii++] = b + 1
+        indices[ii++] = b
+      } else {
+        indices[ii++] = a
+        indices[ii++] = b
+        indices[ii++] = a + 1
+        indices[ii++] = a + 1
+        indices[ii++] = b
+        indices[ii++] = b + 1
+      }
     }
   }
 

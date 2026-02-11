@@ -187,6 +187,72 @@ export function m4PerspectiveGL(
   out[o + 15] = 0
 }
 
+// Orthographic projection — WebGPU depth range [0,1]
+export function m4Ortho(
+  out: Float32Array,
+  o: number,
+  left: number,
+  right: number,
+  bottom: number,
+  top: number,
+  near: number,
+  far: number,
+): void {
+  const lr = 1 / (left - right)
+  const bt = 1 / (bottom - top)
+  const nf = 1 / (near - far)
+
+  out[o] = -2 * lr
+  out[o + 1] = 0
+  out[o + 2] = 0
+  out[o + 3] = 0
+  out[o + 4] = 0
+  out[o + 5] = -2 * bt
+  out[o + 6] = 0
+  out[o + 7] = 0
+  out[o + 8] = 0
+  out[o + 9] = 0
+  out[o + 10] = nf
+  out[o + 11] = 0
+  out[o + 12] = (left + right) * lr
+  out[o + 13] = (top + bottom) * bt
+  out[o + 14] = near * nf
+  out[o + 15] = 1
+}
+
+// Orthographic projection — WebGL depth range [-1,1]
+export function m4OrthoGL(
+  out: Float32Array,
+  o: number,
+  left: number,
+  right: number,
+  bottom: number,
+  top: number,
+  near: number,
+  far: number,
+): void {
+  const lr = 1 / (left - right)
+  const bt = 1 / (bottom - top)
+  const nf = 1 / (near - far)
+
+  out[o] = -2 * lr
+  out[o + 1] = 0
+  out[o + 2] = 0
+  out[o + 3] = 0
+  out[o + 4] = 0
+  out[o + 5] = -2 * bt
+  out[o + 6] = 0
+  out[o + 7] = 0
+  out[o + 8] = 0
+  out[o + 9] = 0
+  out[o + 10] = 2 * nf
+  out[o + 11] = 0
+  out[o + 12] = (left + right) * lr
+  out[o + 13] = (top + bottom) * bt
+  out[o + 14] = (far + near) * nf
+  out[o + 15] = 1
+}
+
 export function m4LookAt(
   out: Float32Array,
   o: number,
