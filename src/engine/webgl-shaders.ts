@@ -11,6 +11,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -56,6 +58,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -129,6 +133,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -147,6 +153,7 @@ in vec3 vShadowCoord;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 bloomColor;
+layout(location = 2) out vec4 outlineOut;
 
 // Poisson disk samples (9 taps)
 const vec2 POISSON_DISK[9] = vec2[9](
@@ -193,6 +200,7 @@ void main() {
   vec4 c = vec4(finalColor, model.color.a);
   fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
   bloomColor = vec4(c.rgb * model.bloom, c.a);
+  outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
 
@@ -209,6 +217,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(location = 0) in vec3 position;
@@ -232,6 +242,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 in vec3 vVertColor;
@@ -251,17 +263,21 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 in vec3 vVertColor;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 bloomColor;
+layout(location = 2) out vec4 outlineOut;
 
 void main() {
   vec4 c = vec4(model.color.rgb * vVertColor, model.color.a);
   fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
   bloomColor = vec4(c.rgb * model.bloom, c.a);
+  outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
 
@@ -278,6 +294,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -325,6 +343,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -401,6 +421,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -421,6 +443,7 @@ in vec2 vUV;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 bloomColor;
+layout(location = 2) out vec4 outlineOut;
 
 // Poisson disk samples (9 taps)
 const vec2 POISSON_DISK[9] = vec2[9](
@@ -468,6 +491,7 @@ void main() {
   vec4 c = vec4(finalColor, model.color.a);
   fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
   bloomColor = vec4(c.rgb * model.bloom, c.a);
+  outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
 
@@ -484,6 +508,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform Lighting {
@@ -546,6 +572,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(location = 0) in vec3 position;
@@ -569,6 +597,8 @@ layout(std140) uniform Model {
   vec4 color;
   float bloom;
   float bloomWhiten;
+  float outline;
+  float outlineScale;
 } model;
 
 layout(std140) uniform JointMatrices {
@@ -688,8 +718,19 @@ precision highp float;
 
 uniform sampler2D uSceneTex;
 uniform sampler2D uBloomTex;
+uniform sampler2D uOutlineTex;
 uniform float uIntensity;
 uniform float uThreshold;
+uniform float uOutlineThickness;
+uniform vec3 uOutlineColor;
+uniform vec2 uTexelSize;
+
+const vec2 OUTLINE_DIRS[16] = vec2[16](
+  vec2(1.0, 0.0), vec2(0.9239, 0.3827), vec2(0.7071, 0.7071), vec2(0.3827, 0.9239),
+  vec2(0.0, 1.0), vec2(-0.3827, 0.9239), vec2(-0.7071, 0.7071), vec2(-0.9239, 0.3827),
+  vec2(-1.0, 0.0), vec2(-0.9239, -0.3827), vec2(-0.7071, -0.7071), vec2(-0.3827, -0.9239),
+  vec2(0.0, -1.0), vec2(0.3827, -0.9239), vec2(0.7071, -0.7071), vec2(0.9239, -0.3827)
+);
 
 in vec2 vUV;
 
@@ -699,6 +740,40 @@ void main() {
   vec4 scene = texture(uSceneTex, vUV);
   vec4 bloom = texture(uBloomTex, vUV);
   vec3 bloomContrib = max(bloom.rgb - vec3(uThreshold), vec3(0.0));
-  fragColor = vec4(scene.rgb + bloomContrib * uIntensity, scene.a);
+  vec3 color = scene.rgb + bloomContrib * uIntensity;
+
+  // Outline edge detection (per-entity ID based, with distance scaling)
+  if (uOutlineThickness > 0.0) {
+    vec4 centerSample = texture(uOutlineTex, vUV);
+    float centerVal = centerSample.r;
+    float centerScale = centerSample.g;
+
+    // Probe 4 cardinal neighbors at half-thickness to find nearby outline scale
+    vec2 pr = uOutlineThickness * 0.5 * uTexelSize;
+    float p0 = texture(uOutlineTex, vUV + vec2(pr.x, 0.0)).g;
+    float p1 = texture(uOutlineTex, vUV - vec2(pr.x, 0.0)).g;
+    float p2 = texture(uOutlineTex, vUV + vec2(0.0, pr.y)).g;
+    float p3 = texture(uOutlineTex, vUV - vec2(0.0, pr.y)).g;
+    float probeScale = max(max(p0, p1), max(p2, p3));
+
+    // Use whichever scale is larger — ensures closer object's outline dominates at boundaries
+    float effectiveScale = max(centerScale, probeScale);
+
+    float scaledThickness = uOutlineThickness * effectiveScale;
+    float isOutline = 0.0;
+    for (int i = 0; i < 16; i++) {
+      vec2 offset = OUTLINE_DIRS[i] * uTexelSize * scaledThickness;
+      float neighborVal = texture(uOutlineTex, vUV + offset).r;
+      float eitherOutlined = step(0.002, max(centerVal, neighborVal));
+      float diff = abs(centerVal - neighborVal);
+      float maxId = max(centerVal, neighborVal);
+      float relDiff = diff / max(maxId, 0.001);
+      float different = step(0.3, relDiff);
+      isOutline = max(isOutline, eitherOutlined * different);
+    }
+    color = mix(color, uOutlineColor, isOutline);
+  }
+
+  fragColor = vec4(color, scene.a);
 }
 `

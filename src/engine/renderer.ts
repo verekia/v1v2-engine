@@ -86,6 +86,11 @@ export interface RenderScene {
   bloomRadius?: number
   bloomWhiten?: number
   bloomValues?: Float32Array
+  outlineEnabled?: boolean
+  outlineThickness?: number
+  outlineColor?: [number, number, number]
+  outlineDistanceFactor?: number
+  outlineMask?: Uint8Array
 }
 
 interface GeometryGPU {
@@ -173,6 +178,10 @@ export class Renderer implements IRenderer {
   private bloomMsaaView: GPUTextureView | null = null
   private bloomTexture: GPUTexture | null = null
   private bloomTextureView: GPUTextureView | null = null
+  private outlineMsaaTexture: GPUTexture | null = null
+  private outlineMsaaView: GPUTextureView | null = null
+  private outlineTexture: GPUTexture | null = null
+  private outlineTextureView: GPUTextureView | null = null
   private bloomMips: GPUTexture[] = []
   private bloomMipViews: GPUTextureView[] = []
   private bloomDownsampleBGs: GPUBindGroup[] = []
@@ -512,8 +521,9 @@ export class Renderer implements IRenderer {
     })
 
     // ── MRT pipelines (bloom — 2 color targets, fsMRT entry point) ────
-    const mrtTargets: GPUColorTargetState[] = [{ format }, { format }]
+    const mrtTargets: GPUColorTargetState[] = [{ format }, { format }, { format }]
     const mrtAlphaTargets: GPUColorTargetState[] = [
+      { format, blend: alphaBlend },
       { format, blend: alphaBlend },
       { format, blend: alphaBlend },
     ]
@@ -799,8 +809,9 @@ export class Renderer implements IRenderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     })
 
@@ -854,7 +865,7 @@ export class Renderer implements IRenderer {
       )
     }
     this.bloomCompositeParamsBuffer = device.createBuffer({
-      size: 16,
+      size: 48,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     this.bloomLinearSampler = device.createSampler({
@@ -912,6 +923,22 @@ export class Renderer implements IRenderer {
     })
     this.bloomTextureView = this.bloomTexture.createView()
 
+    // Outline MRT MSAA + resolve (full res)
+    this.outlineMsaaTexture = device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      sampleCount: MSAA_SAMPLES,
+    })
+    this.outlineMsaaView = this.outlineMsaaTexture.createView()
+
+    this.outlineTexture = device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    this.outlineTextureView = this.outlineTexture.createView()
+
     // Mip chain: 5 levels at 1/2, 1/4, 1/8, 1/16, 1/32
     let mw = w,
       mh = h
@@ -966,14 +993,15 @@ export class Renderer implements IRenderer {
       )
     }
 
-    // Composite: reads scene + mip[0] (accumulated bloom)
+    // Composite: reads scene + mip[0] (accumulated bloom) + outline
     this.bloomCompositeBGInst = device.createBindGroup({
       layout: this.bloomCompositeBGL,
       entries: [
         { binding: 0, resource: this.bloomSceneView },
         { binding: 1, resource: this.bloomMipViews[0]! },
-        { binding: 2, resource: this.bloomLinearSampler },
-        { binding: 3, resource: { buffer: this.bloomCompositeParamsBuffer } },
+        { binding: 2, resource: this.outlineTextureView! },
+        { binding: 3, resource: this.bloomLinearSampler },
+        { binding: 4, resource: { buffer: this.bloomCompositeParamsBuffer } },
       ],
     })
 
@@ -985,6 +1013,8 @@ export class Renderer implements IRenderer {
     this.bloomSceneTexture?.destroy()
     this.bloomMsaaTexture?.destroy()
     this.bloomTexture?.destroy()
+    this.outlineMsaaTexture?.destroy()
+    this.outlineTexture?.destroy()
     for (const tex of this.bloomMips) tex.destroy()
     this.bloomSceneTexture = null
     this.bloomSceneView = null
@@ -992,6 +1022,10 @@ export class Renderer implements IRenderer {
     this.bloomMsaaView = null
     this.bloomTexture = null
     this.bloomTextureView = null
+    this.outlineMsaaTexture = null
+    this.outlineMsaaView = null
+    this.outlineTexture = null
+    this.outlineTextureView = null
     this.bloomMips = []
     this.bloomMipViews = []
     this.bloomDownsampleBGs = []
@@ -1281,6 +1315,16 @@ export class Renderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
+    // Extract camera eye from view matrix for distance calculations
+    const vm = scene.cameraView
+    const vtx = vm[12]!,
+      vty = vm[13]!,
+      vtz = vm[14]!
+    const eyeX = -(vm[0]! * vtx + vm[1]! * vty + vm[2]! * vtz)
+    const eyeY = -(vm[4]! * vtx + vm[5]! * vty + vm[6]! * vtz)
+    const eyeZ = -(vm[8]! * vtx + vm[9]! * vty + vm[10]! * vtz)
+    const outlineDF = scene.outlineDistanceFactor ?? 0
+
     // Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
     const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
     for (let i = 0; i < scene.entityCount; i++) {
@@ -1296,6 +1340,18 @@ export class Renderer implements IRenderer {
       const bloomVal = scene.bloomValues?.[i] ?? 0
       modelSlot[20] = bloomVal
       modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+      const outlineGroup = scene.outlineMask?.[i] ?? 0
+      const isOutlined = outlineGroup > 0
+      modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
+      if (isOutlined && outlineDF > 0) {
+        const dx = scene.positions[i * 3]! - eyeX
+        const dy = scene.positions[i * 3 + 1]! - eyeY
+        const dz = scene.positions[i * 3 + 2]! - eyeZ
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+      } else {
+        modelSlot[23] = isOutlined ? 1.0 : 0.0
+      }
       device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
     }
 
@@ -1390,13 +1446,13 @@ export class Renderer implements IRenderer {
     }
 
     // ── Main render pass ───────────────────────────────────────────────
-    const useBloom = !!scene.bloomEnabled
+    const usePostprocessing = !!scene.bloomEnabled || !!scene.outlineEnabled
     const canvasTex = this.context.getCurrentTexture()
 
-    if (useBloom) {
+    if (usePostprocessing) {
       this.ensureBloomTextures(canvasTex.width, canvasTex.height)
 
-      // MRT pass: 2 color attachments → sceneTexture + bloomTexture
+      // MRT pass: 3 color attachments → sceneTexture + bloomTexture + outlineTexture
       const pass = encoder.beginRenderPass({
         colorAttachments: [
           {
@@ -1409,6 +1465,13 @@ export class Renderer implements IRenderer {
           {
             view: this.bloomMsaaView!,
             resolveTarget: this.bloomTextureView!,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+          {
+            view: this.outlineMsaaView!,
+            resolveTarget: this.outlineTextureView!,
             clearValue: { r: 0, g: 0, b: 0, a: 0 },
             loadOp: 'clear',
             storeOp: 'store',
@@ -1474,11 +1537,21 @@ export class Renderer implements IRenderer {
         p.end()
       }
 
-      // Composite: sceneTexture + mip[0] (accumulated bloom) → canvas
-      const compositeParams = new Float32Array(4)
+      // Composite: sceneTexture + mip[0] (accumulated bloom) + outline → canvas
+      const compositeParams = new Float32Array(12) // 48 bytes
       compositeParams[0] = scene.bloomIntensity ?? 1
       compositeParams[1] = scene.bloomThreshold ?? 0
-      device.queue.writeBuffer(this.bloomCompositeParamsBuffer, 0, compositeParams.buffer as ArrayBuffer, 0, 16)
+      compositeParams[2] = scene.outlineEnabled ? (scene.outlineThickness ?? 3) : 0
+      compositeParams[3] = 0 // pad
+      compositeParams[4] = scene.outlineColor?.[0] ?? 0
+      compositeParams[5] = scene.outlineColor?.[1] ?? 0
+      compositeParams[6] = scene.outlineColor?.[2] ?? 0
+      compositeParams[7] = 1 // alpha pad
+      compositeParams[8] = 1 / canvasTex.width
+      compositeParams[9] = 1 / canvasTex.height
+      compositeParams[10] = 0 // pad
+      compositeParams[11] = 0 // pad
+      device.queue.writeBuffer(this.bloomCompositeParamsBuffer, 0, compositeParams.buffer as ArrayBuffer, 0, 48)
       const compositePass = encoder.beginRenderPass({
         colorAttachments: [
           {

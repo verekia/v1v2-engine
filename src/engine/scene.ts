@@ -32,6 +32,20 @@ function createDefaultBloom(): BloomConfig {
   return { enabled: false, intensity: 1, threshold: 0, radius: 1, whiten: 0 }
 }
 
+// ── Outline config ──────────────────────────────────────────────────────────
+
+export interface OutlineConfig {
+  enabled: boolean
+  thickness: number
+  color: [number, number, number]
+  /** Distance at which outline is full thickness. Beyond this, outline shrinks proportionally. 0 = no scaling. */
+  distanceFactor: number
+}
+
+function createDefaultOutline(): OutlineConfig {
+  return { enabled: false, thickness: 3, color: [0, 0, 0], distanceFactor: 0 }
+}
+
 // ── Shadow config ───────────────────────────────────────────────────────────
 
 export interface ShadowConfig {
@@ -73,6 +87,8 @@ export interface MeshOptions {
   skinInstanceId?: number
   aoMap?: number
   bloom?: number
+  /** Outline group (0 = no outline, positive = group ID; meshes in the same group share one outline) */
+  outline?: number
 }
 
 export class Mesh {
@@ -88,6 +104,7 @@ export class Mesh {
   skinInstanceId: number
   aoMap: number
   bloom: number
+  outline: number
   boneParent: Mesh | null = null
   boneSkinInstance: SkinInstance | null = null
   boneNodeIndex = -1
@@ -104,6 +121,7 @@ export class Mesh {
     this.skinInstanceId = opts.skinInstanceId ?? -1
     this.aoMap = opts.aoMap ?? -1
     this.bloom = opts.bloom ?? 0
+    this.outline = opts.outline ?? 0
   }
 }
 
@@ -139,6 +157,7 @@ export class Scene {
   readonly camera = new Camera()
   readonly shadow: ShadowConfig = createDefaultShadow()
   readonly bloom: BloomConfig = createDefaultBloom()
+  readonly outline: OutlineConfig = createDefaultOutline()
   readonly lightDirection = new Float32Array(3)
   readonly lightDirColor = new Float32Array(3)
   readonly lightAmbientColor = new Float32Array(3)
@@ -167,6 +186,7 @@ export class Scene {
   private _texturedMask: Uint8Array
   private _aoMapIds: Int16Array
   private _bloomValues: Float32Array
+  private _outlineMask: Uint8Array
 
   // View/projection matrices (written during render)
   private _viewMatrix = new Float32Array(16)
@@ -200,6 +220,7 @@ export class Scene {
     this._texturedMask = new Uint8Array(maxEntities)
     this._aoMapIds = new Int16Array(maxEntities).fill(-1)
     this._bloomValues = new Float32Array(maxEntities)
+    this._outlineMask = new Uint8Array(maxEntities)
   }
 
   get backendType(): BackendType {
@@ -374,6 +395,7 @@ export class Scene {
       this._texturedMask[i] = m.aoMap >= 0 ? 1 : 0
       this._aoMapIds[i] = m.aoMap
       this._bloomValues[i] = m.bloom
+      this._outlineMask[i] = m.outline
     }
 
     // Bone attachment pass: override world matrices for bone-attached meshes
@@ -422,6 +444,11 @@ export class Scene {
       bloomRadius: this.bloom.radius,
       bloomWhiten: this.bloom.whiten,
       bloomValues: this._bloomValues,
+      outlineEnabled: this.outline.enabled,
+      outlineThickness: this.outline.thickness,
+      outlineColor: this.outline.color,
+      outlineDistanceFactor: this.outline.distanceFactor,
+      outlineMask: this._outlineMask,
     }
 
     // Compute shadow VP if enabled

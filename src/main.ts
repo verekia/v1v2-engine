@@ -132,6 +132,11 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   scene.bloom.radius = 1
   scene.bloom.whiten = 0.5
 
+  // ── Outline ────────────────────────────────────────────────────────
+  scene.outline.enabled = true
+  scene.outline.thickness = 5
+  scene.outline.distanceFactor = 10
+
   // ── Register geometries ───────────────────────────────────────────────
   const box = createBoxGeometry(2, 2, 2)
   const cubeGeo = scene.registerGeometry(box.vertices, box.indices)
@@ -173,6 +178,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
             rotation: [0, 0, Math.PI],
             scale: megaxe.scale,
             color: [1, 1, 1],
+            outline: 1,
           }),
         )
       }
@@ -186,6 +192,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
             scale: megaxe.scale,
             color: [1, 1, 1],
             bloom: 1.0,
+            outline: 1,
           }),
         )
       }
@@ -198,6 +205,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
           rotation: [0, 0, Math.PI],
           scale: megaxe.scale,
           color: [1, 1, 1],
+          outline: 1,
         }),
       )
     }
@@ -225,10 +233,19 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     )
     if (merged.uvs) {
       const geo = scene.registerTexturedGeometry(merged.vertices, merged.indices, merged.uvs)
-      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1], aoMap: aoTexId }))
+      scene.add(
+        new Mesh({
+          geometry: geo,
+          position: [0, 0, 0],
+          scale: edenScale,
+          color: [1, 1, 1],
+          aoMap: aoTexId,
+          outline: 2,
+        }),
+      )
     } else {
       const geo = scene.registerGeometry(merged.vertices, merged.indices)
-      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1] }))
+      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1], outline: 2 }))
     }
   }
 
@@ -241,6 +258,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         scale: edenScale,
         color: EDEN_COLORS[em.name] ?? [1, 1, 1],
         bloom: 1.0,
+        outline: 2,
       }),
     )
   }
@@ -282,6 +300,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         color: [1, 1, 1],
         skinned: true,
         skinInstanceId: 0,
+        outline: 1,
       }),
     )
 
@@ -320,6 +339,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         position: [50 + Math.cos(angle) * 4, 80 + Math.sin(angle) * 4, 3],
         color: cubeColors[i]!,
         alpha: 0.5,
+        outline: 1,
       }),
     )
     cubes.push(cube)

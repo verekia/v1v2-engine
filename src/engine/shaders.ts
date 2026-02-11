@@ -11,6 +11,8 @@ struct Model {
   color : vec4f,
   bloom : f32,
   bloomWhiten : f32,
+  outline : f32,
+  outlineScale : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -87,8 +89,9 @@ fn lambertColor(input : VSOut) -> vec4f {
 }
 
 struct FragOutput {
-  @location(0) color    : vec4f,
-  @location(1) bloomOut : vec4f,
+  @location(0) color      : vec4f,
+  @location(1) bloomOut   : vec4f,
+  @location(2) outlineOut : vec4f,
 };
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
@@ -96,6 +99,7 @@ struct FragOutput {
   var out : FragOutput;
   out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
   out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
 `
@@ -182,6 +186,8 @@ struct Model {
   color : vec4f,
   bloom : f32,
   bloomWhiten : f32,
+  outline : f32,
+  outlineScale : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -259,8 +265,9 @@ fn texturedLambertColor(input : VSOut) -> vec4f {
 }
 
 struct FragOutput {
-  @location(0) color    : vec4f,
-  @location(1) bloomOut : vec4f,
+  @location(0) color      : vec4f,
+  @location(1) bloomOut   : vec4f,
+  @location(2) outlineOut : vec4f,
 };
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
@@ -268,6 +275,7 @@ struct FragOutput {
   var out : FragOutput;
   out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
   out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
 `
@@ -316,6 +324,8 @@ struct Model {
   color : vec4f,
   bloom : f32,
   bloomWhiten : f32,
+  outline : f32,
+  outlineScale : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -347,8 +357,9 @@ fn unlitColor(input : VSOut) -> vec4f {
 }
 
 struct FragOutput {
-  @location(0) color    : vec4f,
-  @location(1) bloomOut : vec4f,
+  @location(0) color      : vec4f,
+  @location(1) bloomOut   : vec4f,
+  @location(2) outlineOut : vec4f,
 };
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
@@ -356,6 +367,7 @@ struct FragOutput {
   var out : FragOutput;
   out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
   out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
 `
@@ -374,6 +386,8 @@ struct Model {
   color : vec4f,
   bloom : f32,
   bloomWhiten : f32,
+  outline : f32,
+  outlineScale : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -395,6 +409,8 @@ struct Model {
   color : vec4f,
   bloom : f32,
   bloomWhiten : f32,
+  outline : f32,
+  outlineScale : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -479,15 +495,26 @@ struct Params {
 
 export const bloomCompositeShader = /* wgsl */ `
 struct CompositeParams {
-  intensity : f32,
-  threshold : f32,
-  _pad0     : f32,
-  _pad1     : f32,
+  intensity        : f32,
+  threshold        : f32,
+  outlineThickness : f32,
+  _pad0            : f32,
+  outlineColor     : vec4f,
+  texelSize        : vec2f,
+  _pad1            : vec2f,
 };
 @group(0) @binding(0) var sceneTex : texture_2d<f32>;
 @group(0) @binding(1) var bloomTex : texture_2d<f32>;
-@group(0) @binding(2) var texSampler : sampler;
-@group(0) @binding(3) var<uniform> params : CompositeParams;
+@group(0) @binding(2) var outlineTex : texture_2d<f32>;
+@group(0) @binding(3) var texSampler : sampler;
+@group(0) @binding(4) var<uniform> params : CompositeParams;
+
+const OUTLINE_DIRS = array<vec2f, 16>(
+  vec2f(1.0, 0.0), vec2f(0.9239, 0.3827), vec2f(0.7071, 0.7071), vec2f(0.3827, 0.9239),
+  vec2f(0.0, 1.0), vec2f(-0.3827, 0.9239), vec2f(-0.7071, 0.7071), vec2f(-0.9239, 0.3827),
+  vec2f(-1.0, 0.0), vec2f(-0.9239, -0.3827), vec2f(-0.7071, -0.7071), vec2f(-0.3827, -0.9239),
+  vec2f(0.0, -1.0), vec2f(0.3827, -0.9239), vec2f(0.7071, -0.7071), vec2f(0.9239, -0.3827),
+);
 
 struct VSOut {
   @builtin(position) pos : vec4f,
@@ -507,6 +534,40 @@ struct VSOut {
   let scene = textureSample(sceneTex, texSampler, input.uv);
   let bloom = textureSample(bloomTex, texSampler, input.uv);
   let bloomContrib = max(bloom.rgb - vec3f(params.threshold), vec3f(0.0));
-  return vec4f(scene.rgb + bloomContrib * params.intensity, scene.a);
+  var color = scene.rgb + bloomContrib * params.intensity;
+
+  // Outline edge detection (per-entity ID based, with distance scaling)
+  if (params.outlineThickness > 0.0) {
+    let centerSample = textureSample(outlineTex, texSampler, input.uv);
+    let centerVal = centerSample.r;
+    let centerScale = centerSample.g;
+
+    // Probe 4 cardinal neighbors at half-thickness to find nearby outline scale
+    let pr = params.outlineThickness * 0.5 * params.texelSize;
+    let p0 = textureSample(outlineTex, texSampler, input.uv + vec2f(pr.x, 0.0)).g;
+    let p1 = textureSample(outlineTex, texSampler, input.uv - vec2f(pr.x, 0.0)).g;
+    let p2 = textureSample(outlineTex, texSampler, input.uv + vec2f(0.0, pr.y)).g;
+    let p3 = textureSample(outlineTex, texSampler, input.uv - vec2f(0.0, pr.y)).g;
+    let probeScale = max(max(p0, p1), max(p2, p3));
+
+    // Use whichever scale is larger — ensures closer object's outline dominates at boundaries
+    let effectiveScale = max(centerScale, probeScale);
+
+    let scaledThickness = params.outlineThickness * effectiveScale;
+    var isOutline = 0.0;
+    for (var i = 0u; i < 16u; i++) {
+      let offset = OUTLINE_DIRS[i] * params.texelSize * scaledThickness;
+      let neighborVal = textureSample(outlineTex, texSampler, input.uv + offset).r;
+      let eitherOutlined = step(0.002, max(centerVal, neighborVal));
+      let diff = abs(centerVal - neighborVal);
+      let maxId = max(centerVal, neighborVal);
+      let relDiff = diff / max(maxId, 0.001);
+      let different = step(0.3, relDiff);
+      isOutline = max(isOutline, eitherOutlined * different);
+    }
+    color = mix(color, params.outlineColor.rgb, isOutline);
+  }
+
+  return vec4f(color, scene.a);
 }
 `

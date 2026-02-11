@@ -1,5 +1,5 @@
 export { createScene, Scene, Mesh, Camera } from './scene.ts'
-export type { MeshOptions, ShadowConfig, BloomConfig } from './scene.ts'
+export type { MeshOptions, ShadowConfig, BloomConfig, OutlineConfig } from './scene.ts'
 export { HtmlOverlay, HtmlElement } from './html-overlay.ts'
 export type { HtmlElementOptions } from './html-overlay.ts'
 export { createRenderer } from './gpu.ts'

@@ -119,13 +119,18 @@ export class WebGLRenderer implements IRenderer {
   private bloomUsOffsetLoc: WebGLUniformLocation | null
   private bloomCompSceneTexLoc: WebGLUniformLocation | null
   private bloomCompBloomTexLoc: WebGLUniformLocation | null
+  private bloomCompOutlineTexLoc: WebGLUniformLocation | null
   private bloomCompIntensityLoc: WebGLUniformLocation | null
   private bloomCompThresholdLoc: WebGLUniformLocation | null
+  private bloomCompOutlineThicknessLoc: WebGLUniformLocation | null
+  private bloomCompOutlineColorLoc: WebGLUniformLocation | null
+  private bloomCompTexelSizeLoc: WebGLUniformLocation | null
 
   // Bloom FBO resources
   private bloomMrtFBO: WebGLFramebuffer | null = null
   private bloomSceneTexture: WebGLTexture | null = null
   private bloomEmitTexture: WebGLTexture | null = null
+  private bloomOutlineTexture: WebGLTexture | null = null
   private bloomDepthRB: WebGLRenderbuffer | null = null
   private bloomMips: WebGLTexture[] = []
   private bloomMipFBOs: WebGLFramebuffer[] = []
@@ -263,8 +268,12 @@ export class WebGLRenderer implements IRenderer {
     this.bloomUsOffsetLoc = gl.getUniformLocation(this.bloomUpsampleProgram, 'uOffset')
     this.bloomCompSceneTexLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uSceneTex')
     this.bloomCompBloomTexLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uBloomTex')
+    this.bloomCompOutlineTexLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uOutlineTex')
     this.bloomCompIntensityLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uIntensity')
     this.bloomCompThresholdLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uThreshold')
+    this.bloomCompOutlineThicknessLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uOutlineThickness')
+    this.bloomCompOutlineColorLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uOutlineColor')
+    this.bloomCompTexelSizeLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uTexelSize')
 
     // ── Create UBOs ─────────────────────────────────────────────────
     this.cameraUBO = gl.createBuffer()!
@@ -365,6 +374,15 @@ export class WebGLRenderer implements IRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 
+    // Outline silhouette texture (MRT attachment 2)
+    this.bloomOutlineTexture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomOutlineTexture)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
     // Depth renderbuffer
     this.bloomDepthRB = gl.createRenderbuffer()!
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.bloomDepthRB)
@@ -375,8 +393,9 @@ export class WebGLRenderer implements IRenderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMrtFBO)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.bloomSceneTexture, 0)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this.bloomEmitTexture, 0)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, this.bloomOutlineTexture, 0)
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.bloomDepthRB)
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2])
 
     // Mip chain: 5 levels at half/quarter/eighth/sixteenth/thirty-second
     let mw = w,
@@ -412,12 +431,14 @@ export class WebGLRenderer implements IRenderer {
     if (this.bloomMrtFBO) gl.deleteFramebuffer(this.bloomMrtFBO)
     if (this.bloomSceneTexture) gl.deleteTexture(this.bloomSceneTexture)
     if (this.bloomEmitTexture) gl.deleteTexture(this.bloomEmitTexture)
+    if (this.bloomOutlineTexture) gl.deleteTexture(this.bloomOutlineTexture)
     if (this.bloomDepthRB) gl.deleteRenderbuffer(this.bloomDepthRB)
     for (const tex of this.bloomMips) gl.deleteTexture(tex)
     for (const fbo of this.bloomMipFBOs) gl.deleteFramebuffer(fbo)
     this.bloomMrtFBO = null
     this.bloomSceneTexture = null
     this.bloomEmitTexture = null
+    this.bloomOutlineTexture = null
     this.bloomDepthRB = null
     this.bloomMips = []
     this.bloomMipFBOs = []
@@ -691,6 +712,16 @@ export class WebGLRenderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
+    // Extract camera eye from view matrix for distance calculations
+    const vm0 = scene.cameraView
+    const vtx = vm0[12]!,
+      vty = vm0[13]!,
+      vtz = vm0[14]!
+    const eyeX = -(vm0[0]! * vtx + vm0[1]! * vty + vm0[2]! * vtz)
+    const eyeY = -(vm0[4]! * vtx + vm0[5]! * vty + vm0[6]! * vtz)
+    const eyeZ = -(vm0[8]! * vtx + vm0[9]! * vty + vm0[10]! * vtz)
+    const outlineDF = scene.outlineDistanceFactor ?? 0
+
     // ── Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
     const modelSlot = this.modelSlot
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.modelUBO)
@@ -704,10 +735,22 @@ export class WebGLRenderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
-      // bloom (float at offset 20) + bloomWhiten (float at offset 21)
+      // bloom (float at offset 20) + bloomWhiten (float at offset 21) + outline (float at offset 22) + outlineScale (float at offset 23)
       const bloomVal = scene.bloomValues?.[i] ?? 0
       modelSlot[20] = bloomVal
       modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+      const outlineGroup = scene.outlineMask?.[i] ?? 0
+      const isOutlined = outlineGroup > 0
+      modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
+      if (isOutlined && outlineDF > 0) {
+        const dx = scene.positions[i * 3]! - eyeX
+        const dy = scene.positions[i * 3 + 1]! - eyeY
+        const dz = scene.positions[i * 3 + 2]! - eyeZ
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+      } else {
+        modelSlot[23] = isOutlined ? 1.0 : 0.0
+      }
 
       gl.bufferSubData(gl.UNIFORM_BUFFER, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
     }
@@ -789,16 +832,16 @@ export class WebGLRenderer implements IRenderer {
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
     }
 
-    const useBloom = !!scene.bloomEnabled
+    const usePostprocessing = !!scene.bloomEnabled || !!scene.outlineEnabled
 
-    if (useBloom) {
+    if (usePostprocessing) {
       const w = gl.drawingBufferWidth
       const h = gl.drawingBufferHeight
       this.ensureBloomTextures(w, h)
 
       // ── MRT scene pass ─────────────────────────────────────────────
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMrtFBO)
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2])
       gl.viewport(0, 0, w, h)
       gl.clearColor(0.15, 0.15, 0.2, 1)
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
@@ -888,8 +931,20 @@ export class WebGLRenderer implements IRenderer {
       gl.bindTexture(gl.TEXTURE_2D, this.bloomMips[0]!)
       gl.uniform1i(this.bloomCompBloomTexLoc, 1)
 
+      gl.activeTexture(gl.TEXTURE2)
+      gl.bindTexture(gl.TEXTURE_2D, this.bloomOutlineTexture!)
+      gl.uniform1i(this.bloomCompOutlineTexLoc, 2)
+
       gl.uniform1f(this.bloomCompIntensityLoc, scene.bloomIntensity ?? 1)
       gl.uniform1f(this.bloomCompThresholdLoc, scene.bloomThreshold ?? 0)
+      gl.uniform1f(this.bloomCompOutlineThicknessLoc, scene.outlineEnabled ? (scene.outlineThickness ?? 3) : 0)
+      gl.uniform3f(
+        this.bloomCompOutlineColorLoc,
+        scene.outlineColor?.[0] ?? 0,
+        scene.outlineColor?.[1] ?? 0,
+        scene.outlineColor?.[2] ?? 0,
+      )
+      gl.uniform2f(this.bloomCompTexelSizeLoc, 1 / w, 1 / h)
 
       gl.drawArrays(gl.TRIANGLES, 0, 3)
 
