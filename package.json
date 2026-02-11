@@ -1,10 +1,22 @@
 {
-  "name": "mana-engine",
-  "private": true,
+  "name": "@v1v2/engine",
+  "version": "0.1.0",
+  "files": [
+    "dist"
+  ],
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "bun run --parallel 'dev:*'",
+    "dev:example": "next dev",
+    "build": "bun run --parallel 'build:*'",
+    "build:example": "next build",
+    "build:library": "tsup",
     "start": "serve out",
     "postinstall": "bun typegen",
     "typegen": "next typegen",
@@ -16,11 +28,6 @@
     "buntest": "bun test",
     "all": "bun run lint && bun run format:check && bun run buntest && bun run typecheck"
   },
-  "dependencies": {
-    "next": "16.1.2",
-    "react": "19.2.3",
-    "react-dom": "19.2.3"
-  },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.18",
     "@types/node": "25.0.9",
@@ -29,11 +36,15 @@
     "@typescript/native-preview": "^7.0.0-dev.20260206.1",
     "@webgpu/types": "^0.1.69",
     "babel-plugin-react-compiler": "1.0.0",
+    "next": "16.1.2",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
     "postcss": "8.5.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "serve": "14.2.5",
     "tailwindcss": "4.1.18",
+    "tsup": "8.5.1",
     "typescript": "5.9.3"
   }
 }
