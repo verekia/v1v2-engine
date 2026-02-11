@@ -49,10 +49,7 @@ export const cubeIndices = new Uint16Array([
 
 // ── Sphere (UV sphere) ───────────────────────────────────────────────
 
-export function createSphereGeometry(
-  stacks = 16,
-  slices = 24,
-): { vertices: Float32Array; indices: Uint16Array } {
+export function createSphereGeometry(stacks = 16, slices = 24): { vertices: Float32Array; indices: Uint16Array } {
   const vertCount = (stacks + 1) * (slices + 1)
   const vertices = new Float32Array(vertCount * 9)
   let vi = 0

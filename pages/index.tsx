@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+
 import Head from 'next/head'
 
 export default function GamePage() {
@@ -7,7 +8,7 @@ export default function GamePage() {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    import('../src/main.ts').then((m) => m.startDemo(canvas))
+    import('../src/main.ts').then(m => m.startDemo(canvas))
   }, [])
 
   return (
@@ -19,10 +20,7 @@ export default function GamePage() {
           html, body { overflow: hidden; width: 100%; height: 100%; }
         `}</style>
       </Head>
-      <canvas
-        ref={canvasRef}
-        style={{ width: '100vw', height: '100vh', display: 'block' }}
-      />
+      <canvas ref={canvasRef} style={{ width: '100vw', height: '100vh', display: 'block' }} />
     </>
   )
 }

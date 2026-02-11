@@ -3,8 +3,8 @@ const HALF_PI = Math.PI / 2 - 0.001 // clamp to avoid gimbal flip
 
 export class OrbitControls {
   // Spherical coordinates
-  theta = 0          // horizontal angle (radians)
-  phi = Math.PI / 6  // vertical angle (radians, 0 = horizon, +PI/2 = above)
+  theta = Math.PI // horizontal angle (radians)
+  phi = Math.PI / 6 // vertical angle (radians, 0 = horizon, +PI/2 = above)
   radius = 10
 
   // Target (orbit center)
@@ -35,7 +35,7 @@ export class OrbitControls {
     canvas.addEventListener('pointerup', this.onPointerUp)
     canvas.addEventListener('pointerleave', this.onPointerUp)
     canvas.addEventListener('wheel', this.onWheel, { passive: false })
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault())
+    canvas.addEventListener('contextmenu', e => e.preventDefault())
     this.updateEye()
   }
 
@@ -73,8 +73,8 @@ export class OrbitControls {
       const ry = -sinT
       // Up vector: world Z for simplicity
       const panScale = this.panSensitivity * this.radius * 0.1
-      this.targetX += (dx * rx) * panScale
-      this.targetY += (dx * ry) * panScale
+      this.targetX += dx * rx * panScale
+      this.targetY += dx * ry * panScale
       this.targetZ += dy * panScale
     }
 

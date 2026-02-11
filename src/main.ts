@@ -1,12 +1,21 @@
-import {
-  initGPU, Renderer, OrbitControls, loadGlb,
-  createSkeleton, createSkinInstance, updateSkinInstance,
-  createSphereGeometry, mergeGeometries,
-  m4FromTRS, m4LookAt, m4Perspective,
-} from './engine/index.ts'
-import type { RenderScene, SkinInstance } from './engine/index.ts'
 import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER, SKINNED } from './ecs/index.ts'
 import { InputManager } from './ecs/index.ts'
+import {
+  initGPU,
+  Renderer,
+  OrbitControls,
+  loadGlb,
+  createSkeleton,
+  createSkinInstance,
+  updateSkinInstance,
+  createSphereGeometry,
+  mergeGeometries,
+  m4FromTRS,
+  m4LookAt,
+  m4Perspective,
+} from './engine/index.ts'
+
+import type { RenderScene, SkinInstance } from './engine/index.ts'
 
 const MOVE_SPEED = 3
 const SPHERE_GEO_ID = 1
@@ -17,32 +26,32 @@ const UP = new Float32Array([0, 0, 1])
 
 const EDEN_COLORS: Record<string, [number, number, number]> = {
   Eden_1: [0.78, 0.44, 0.25],
-  Eden_2: [0.85, 0.68, 0.30],
+  Eden_2: [0.85, 0.68, 0.3],
   Eden_3: [0.75, 0.75, 0.75],
-  Eden_4: [0.78, 0.30, 0.20],
-  Eden_5: [0.25, 0.55, 0.20],
-  Eden_6: [0.30, 0.36, 0.30],
+  Eden_4: [0.78, 0.3, 0.2],
+  Eden_5: [0.25, 0.55, 0.2],
+  Eden_6: [0.3, 0.36, 0.3],
   Eden_7: [0.75, 0.75, 0.75],
   Eden_8: [0.15, 0.15, 0.18],
-  Eden_9: [0.00, 0.75, 0.70],
-  Eden_10: [0.55, 0.50, 0.42],
+  Eden_9: [0.0, 0.75, 0.7],
+  Eden_10: [0.55, 0.5, 0.42],
   Eden_11: [0.85, 0.35, 0.55],
   Eden_12: [0.95, 0.95, 0.95],
-  Eden_13: [0.80, 0.65, 0.15],
+  Eden_13: [0.8, 0.65, 0.15],
   Eden_14: [0.65, 0.65, 0.62],
-  Eden_15: [0.30, 0.65, 0.20],
-  Eden_16: [0.50, 0.32, 0.15],
-  Eden_17: [0.50, 0.25, 0.65],
-  Eden_18: [0.90, 0.80, 0.20],
+  Eden_15: [0.3, 0.65, 0.2],
+  Eden_16: [0.5, 0.32, 0.15],
+  Eden_17: [0.5, 0.25, 0.65],
+  Eden_18: [0.9, 0.8, 0.2],
   Eden_19: [0.15, 0.15, 0.18],
   Eden_20: [0.75, 0.75, 0.75],
   Eden_21: [0.95, 0.95, 0.95],
-  Eden_22: [0.60, 0.40, 0.22],
-  Eden_23: [0.60, 0.40, 0.22],
-  Eden_24: [0.00, 0.75, 0.70],
-  Eden_25: [0.90, 0.80, 0.20],
+  Eden_22: [0.6, 0.4, 0.22],
+  Eden_23: [0.6, 0.4, 0.22],
+  Eden_24: [0.0, 0.75, 0.7],
+  Eden_25: [0.9, 0.8, 0.2],
   Eden_26: [0.85, 0.35, 0.55],
-  Eden_27: [0.30, 0.36, 0.30],
+  Eden_27: [0.3, 0.36, 0.3],
 }
 
 export async function startDemo(canvas: HTMLCanvasElement) {
@@ -64,9 +73,9 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Load static GLB (megaxe + Eden) ───────────────────────────────
   const megaxeColors = new Map<number, [number, number, number]>([
-    [0, [1, 1, 1]],       // material 0 → white
-    [1, [0, 0, 0]],       // material 1 → black
-    [2, [0, 0.9, 0.8]],   // material 2 → bright teal
+    [0, [1, 1, 1]], // material 0 → white
+    [1, [0, 0, 0]], // material 1 → black
+    [2, [0, 0.9, 0.8]], // material 2 → bright teal
   ])
   const { meshes: glbMeshes } = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
@@ -171,7 +180,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Resize handling ───────────────────────────────────────────────
   let aspect = canvas.width / canvas.height
 
-  const resizeObserver = new ResizeObserver((entries) => {
+  const resizeObserver = new ResizeObserver(entries => {
     for (const entry of entries) {
       const { width, height } = entry.contentRect
       const dpr = devicePixelRatio
@@ -219,30 +228,14 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     // ── Transform system ──────────────────────────────────────────
     for (let i = 0; i < world.entityCount; i++) {
       if (!(world.componentMask[i]! & TRANSFORM)) continue
-      m4FromTRS(
-        world.worldMatrices, i * 16,
-        world.positions, i * 3,
-        world.rotations, i * 3,
-        world.scales, i * 3,
-      )
+      m4FromTRS(world.worldMatrices, i * 16, world.positions, i * 3, world.rotations, i * 3, world.scales, i * 3)
     }
 
     // ── Camera system (orbit controls) ─────────────────────────────
     for (let i = 0; i < world.entityCount; i++) {
       if (!(world.componentMask[i]! & CAMERA)) continue
-      m4LookAt(
-        world.viewMatrices, i * 16,
-        orbit.eye, 0,
-        orbit.target, 0,
-        UP, 0,
-      )
-      m4Perspective(
-        world.projMatrices, i * 16,
-        world.fovs[i]!,
-        aspect,
-        world.nears[i]!,
-        world.fars[i]!,
-      )
+      m4LookAt(world.viewMatrices, i * 16, orbit.eye, 0, orbit.target, 0, UP, 0)
+      m4Perspective(world.projMatrices, i * 16, world.fovs[i]!, aspect, world.nears[i]!, world.fars[i]!)
     }
 
     // ── Build render masks ──────────────────────────────────────────

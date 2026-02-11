@@ -134,9 +134,22 @@ export async function loadGlb(
     const t = new Float32Array(3)
     const r = new Float32Array([0, 0, 0, 1])
     const s = new Float32Array([1, 1, 1])
-    if (node.translation) { t[0] = node.translation[0]; t[1] = node.translation[1]; t[2] = node.translation[2] }
-    if (node.rotation) { r[0] = node.rotation[0]; r[1] = node.rotation[1]; r[2] = node.rotation[2]; r[3] = node.rotation[3] }
-    if (node.scale) { s[0] = node.scale[0]; s[1] = node.scale[1]; s[2] = node.scale[2] }
+    if (node.translation) {
+      t[0] = node.translation[0]
+      t[1] = node.translation[1]
+      t[2] = node.translation[2]
+    }
+    if (node.rotation) {
+      r[0] = node.rotation[0]
+      r[1] = node.rotation[1]
+      r[2] = node.rotation[2]
+      r[3] = node.rotation[3]
+    }
+    if (node.scale) {
+      s[0] = node.scale[0]
+      s[1] = node.scale[1]
+      s[2] = node.scale[2]
+    }
     nodeTransforms.push({
       nodeIndex: ni,
       parentIndex: childToParent.get(ni) ?? -1,
@@ -159,8 +172,10 @@ export async function loadGlb(
         // Identity matrices
         for (let j = 0; j < jointNodeIndices.length; j++) {
           const o = j * 16
-          inverseBindMatrices[o] = 1; inverseBindMatrices[o + 5] = 1
-          inverseBindMatrices[o + 10] = 1; inverseBindMatrices[o + 15] = 1
+          inverseBindMatrices[o] = 1
+          inverseBindMatrices[o + 5] = 1
+          inverseBindMatrices[o + 10] = 1
+          inverseBindMatrices[o + 15] = 1
         }
       }
       skins.push({ jointNodeIndices, inverseBindMatrices })
@@ -450,11 +465,7 @@ function decodeDracoPrimitive(
   return { vertices, indices, skinJoints, skinWeights }
 }
 
-function decodeStandardPrimitive(
-  primitive: any,
-  gltf: any,
-  bin: Uint8Array,
-): PrimitiveResult | null {
+function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): PrimitiveResult | null {
   if (primitive.attributes.POSITION === undefined || primitive.indices === undefined) return null
 
   const posAccessor = gltf.accessors[primitive.attributes.POSITION]

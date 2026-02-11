@@ -1,5 +1,6 @@
 import { m4Multiply, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
 import { lambertShader, skinnedLambertShader } from './shaders.ts'
+
 import type { SkinInstance } from './skin.ts'
 
 const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
@@ -87,9 +88,7 @@ export class Renderer {
 
     // ── Bind group layouts ────────────────────────────────────────────
     const cameraBGL = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-      ],
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }],
     })
     this.modelBGL = device.createBindGroupLayout({
       entries: [
@@ -101,9 +100,7 @@ export class Renderer {
       ],
     })
     const lightingBGL = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      ],
+      entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
     })
     const jointBGL = device.createBindGroupLayout({
       entries: [
@@ -132,7 +129,7 @@ export class Renderer {
           {
             arrayStride: 36, // 9 floats * 4 bytes
             attributes: [
-              { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
+              { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
               { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
               { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
             ],
@@ -162,7 +159,7 @@ export class Renderer {
           {
             arrayStride: 36,
             attributes: [
-              { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
+              { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
               { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
               { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
             ],
@@ -170,8 +167,8 @@ export class Renderer {
           {
             arrayStride: 20, // 4 bytes joints + 16 bytes weights
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' },    // joints
-              { shaderLocation: 4, offset: 4, format: 'float32x4' },  // weights
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' }, // joints
+              { shaderLocation: 4, offset: 4, format: 'float32x4' }, // weights
             ],
           },
         ],
@@ -253,7 +250,13 @@ export class Renderer {
       size: vertices.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })
-    this.device.queue.writeBuffer(vertexBuffer, 0, vertices.buffer as ArrayBuffer, vertices.byteOffset, vertices.byteLength)
+    this.device.queue.writeBuffer(
+      vertexBuffer,
+      0,
+      vertices.buffer as ArrayBuffer,
+      vertices.byteOffset,
+      vertices.byteLength,
+    )
 
     const indexByteSize = (indices.byteLength + 3) & ~3 // align to 4 bytes
     const indexBuffer = this.device.createBuffer({
@@ -267,13 +270,21 @@ export class Renderer {
     // Compute bounding sphere radius from vertex positions (stride = 9 floats)
     let maxR2 = 0
     for (let i = 0; i < vertices.length; i += 9) {
-      const x = vertices[i]!, y = vertices[i + 1]!, z = vertices[i + 2]!
+      const x = vertices[i]!,
+        y = vertices[i + 1]!,
+        z = vertices[i + 2]!
       const r2 = x * x + y * y + z * z
       if (r2 > maxR2) maxR2 = r2
     }
 
     const indexFormat: GPUIndexFormat = indices instanceof Uint32Array ? 'uint32' : 'uint16'
-    this.geometries.set(id, { vertexBuffer, indexBuffer, indexCount: indices.length, indexFormat, boundingRadius: Math.sqrt(maxR2) })
+    this.geometries.set(id, {
+      vertexBuffer,
+      indexBuffer,
+      indexCount: indices.length,
+      indexFormat,
+      boundingRadius: Math.sqrt(maxR2),
+    })
   }
 
   registerSkinnedGeometry(
@@ -326,7 +337,9 @@ export class Renderer {
     // Bounding sphere
     let maxR2 = 0
     for (let i = 0; i < vertices.length; i += 9) {
-      const x = vertices[i]!, y = vertices[i + 1]!, z = vertices[i + 2]!
+      const x = vertices[i]!,
+        y = vertices[i + 1]!,
+        z = vertices[i + 2]!
       const r2 = x * x + y * y + z * z
       if (r2 > maxR2) maxR2 = r2
     }
@@ -346,13 +359,25 @@ export class Renderer {
     const device = this.device
 
     // Upload camera (view + proj = 128 bytes)
-    device.queue.writeBuffer(this.cameraBuffer, 0, scene.cameraView.buffer as ArrayBuffer, scene.cameraView.byteOffset + scene.cameraViewOffset * 4, 64)
-    device.queue.writeBuffer(this.cameraBuffer, 64, scene.cameraProj.buffer as ArrayBuffer, scene.cameraProj.byteOffset + scene.cameraProjOffset * 4, 64)
+    device.queue.writeBuffer(
+      this.cameraBuffer,
+      0,
+      scene.cameraView.buffer as ArrayBuffer,
+      scene.cameraView.byteOffset + scene.cameraViewOffset * 4,
+      64,
+    )
+    device.queue.writeBuffer(
+      this.cameraBuffer,
+      64,
+      scene.cameraProj.buffer as ArrayBuffer,
+      scene.cameraProj.byteOffset + scene.cameraProjOffset * 4,
+      64,
+    )
 
     // Upload lighting (direction: vec4, dirColor: vec4, ambient: vec4 = 48 bytes)
     const lightData = new Float32Array(12)
-    lightData.set(scene.lightDirection, 0)   // vec4 slot 0 (w=0)
-    lightData.set(scene.lightDirColor, 4)    // vec4 slot 1 (w=0)
+    lightData.set(scene.lightDirection, 0) // vec4 slot 0 (w=0)
+    lightData.set(scene.lightDirColor, 4) // vec4 slot 1 (w=0)
     lightData.set(scene.lightAmbientColor, 8) // vec4 slot 2 (w=0)
     device.queue.writeBuffer(this.lightingBuffer, 0, lightData)
 
@@ -377,9 +402,10 @@ export class Renderer {
       const sx = Math.abs(scene.scales[si]!)
       const sy = Math.abs(scene.scales[si + 1]!)
       const sz = Math.abs(scene.scales[si + 2]!)
-      const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
       const r = geo.boundingRadius * maxScale
-      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
 
       // worldMatrix (16 floats = 64 bytes)
       for (let j = 0; j < 16; j++) modelSlot[j] = scene.worldMatrices[i * 16 + j]!
@@ -449,9 +475,10 @@ export class Renderer {
       const sx = Math.abs(scene.scales[si]!)
       const sy = Math.abs(scene.scales[si + 1]!)
       const sz = Math.abs(scene.scales[si + 2]!)
-      const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
+      const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
       const r = geo.boundingRadius * maxScale
-      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
+      if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+        continue
 
       pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
       pass.setVertexBuffer(0, geo.vertexBuffer)
@@ -478,9 +505,10 @@ export class Renderer {
         const sx = Math.abs(scene.scales[si]!)
         const sy = Math.abs(scene.scales[si + 1]!)
         const sz = Math.abs(scene.scales[si + 2]!)
-        const maxScale = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz)
+        const maxScale = sx > sy ? (sx > sz ? sx : sz) : sy > sz ? sy : sz
         const r = geo.boundingRadius * maxScale
-        if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r)) continue
+        if (!frustumContainsSphere(planes, scene.positions[si]!, scene.positions[si + 1]!, scene.positions[si + 2]!, r))
+          continue
 
         pass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
         pass.setBindGroup(3, this.jointBG, [slot * JOINT_SLOT_SIZE])

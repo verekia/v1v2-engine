@@ -1,4 +1,5 @@
-import { m4FromQuatTRS, m4Multiply, m4Identity, v3Lerp, quatSlerp } from './math.ts'
+import { m4FromQuatTRS, m4Multiply, v3Lerp, quatSlerp } from './math.ts'
+
 import type { GltfSkin, GltfAnimation, GltfNodeTransform } from './gltf.ts'
 
 const MAX_JOINTS = 128
@@ -87,11 +88,7 @@ function binarySearchKeyframe(times: Float32Array, t: number): number {
   return lo
 }
 
-export function updateSkinInstance(
-  inst: SkinInstance,
-  clips: GltfAnimation[],
-  dt: number,
-): void {
+export function updateSkinInstance(inst: SkinInstance, clips: GltfAnimation[], dt: number): void {
   const clip = clips[inst.clipIndex]!
   const skeleton = inst.skeleton
 
@@ -171,12 +168,7 @@ export function updateSkinInstance(
   // Compute global matrices parent-first (nodes are already in order from glTF)
   for (let i = 0; i < nodeCount; i++) {
     const nt = skeleton.nodeTransforms[i]!
-    m4FromQuatTRS(
-      _localMat, 0,
-      inst.localTranslations, i * 3,
-      inst.localRotations, i * 4,
-      inst.localScales, i * 3,
-    )
+    m4FromQuatTRS(_localMat, 0, inst.localTranslations, i * 3, inst.localRotations, i * 4, inst.localScales, i * 3)
     if (nt.parentIndex >= 0) {
       // Copy parent global to temp, then multiply: global = parent * local
       const po = nt.parentIndex * 16
@@ -192,10 +184,6 @@ export function updateSkinInstance(
   const jointCount = skeleton.jointCount
   for (let j = 0; j < jointCount; j++) {
     const nodeIdx = skeleton.jointNodeIndices[j]!
-    m4Multiply(
-      inst.jointMatrices, j * 16,
-      inst.globalMatrices, nodeIdx * 16,
-      skeleton.inverseBindMatrices, j * 16,
-    )
+    m4Multiply(inst.jointMatrices, j * 16, inst.globalMatrices, nodeIdx * 16, skeleton.inverseBindMatrices, j * 16)
   }
 }

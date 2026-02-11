@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test'
+
 import { quatToEulerZXY, m4FromTRS, m4FromQuatTRS } from './math.ts'
 
 const EPSILON = 1e-6
@@ -28,8 +29,8 @@ describe('quatToEulerZXY', () => {
     const q = quatFromAxisAngle(0, 0, 1, Math.PI / 2)
     const out = new Float32Array(3)
     quatToEulerZXY(out, 0, q, 0)
-    expect(approxEqual(out[0]!, 0)).toBe(true)         // rx
-    expect(approxEqual(out[1]!, 0)).toBe(true)         // ry
+    expect(approxEqual(out[0]!, 0)).toBe(true) // rx
+    expect(approxEqual(out[1]!, 0)).toBe(true) // ry
     expect(approxEqual(out[2]!, Math.PI / 2)).toBe(true) // rz
   })
 
@@ -38,17 +39,17 @@ describe('quatToEulerZXY', () => {
     const out = new Float32Array(3)
     quatToEulerZXY(out, 0, q, 0)
     expect(approxEqual(out[0]!, Math.PI / 4)).toBe(true) // rx
-    expect(approxEqual(out[1]!, 0)).toBe(true)            // ry
-    expect(approxEqual(out[2]!, 0)).toBe(true)            // rz
+    expect(approxEqual(out[1]!, 0)).toBe(true) // ry
+    expect(approxEqual(out[2]!, 0)).toBe(true) // rz
   })
 
   test('90° around Y → ry = π/2', () => {
     const q = quatFromAxisAngle(0, 1, 0, Math.PI / 2)
     const out = new Float32Array(3)
     quatToEulerZXY(out, 0, q, 0)
-    expect(approxEqual(out[0]!, 0)).toBe(true)            // rx
-    expect(approxEqual(out[1]!, Math.PI / 2)).toBe(true)  // ry
-    expect(approxEqual(out[2]!, 0)).toBe(true)            // rz
+    expect(approxEqual(out[0]!, 0)).toBe(true) // rx
+    expect(approxEqual(out[1]!, Math.PI / 2)).toBe(true) // ry
+    expect(approxEqual(out[2]!, 0)).toBe(true) // rz
   })
 })
 
@@ -74,9 +75,7 @@ describe('quatToEulerZXY ↔ m4FromTRS roundtrip', () => {
         for (let row = 0; row < 3; row++) {
           const i = col * 4 + row
           if (!approxEqual(matEuler[i]!, matQuat[i]!)) {
-            throw new Error(
-              `Mismatch at [${col}][${row}]: euler=${matEuler[i]} quat=${matQuat[i]}`,
-            )
+            throw new Error(`Mismatch at [${col}][${row}]: euler=${matEuler[i]} quat=${matQuat[i]}`)
           }
         }
       }
@@ -88,12 +87,11 @@ describe('quatToEulerZXY ↔ m4FromTRS roundtrip', () => {
   testRoundtrip('90° around Y', quatFromAxisAngle(0, 1, 0, Math.PI / 2))
   testRoundtrip('45° around X', quatFromAxisAngle(1, 0, 0, Math.PI / 4))
   testRoundtrip('45° around Z', quatFromAxisAngle(0, 0, 1, Math.PI / 4))
-  testRoundtrip('30° around (1,1,0)', quatFromAxisAngle(
-    1 / Math.SQRT2, 1 / Math.SQRT2, 0, Math.PI / 6,
-  ))
-  testRoundtrip('arbitrary rotation', quatFromAxisAngle(
-    0.2672612419124244, 0.5345224838248488, 0.8017837257372732, 1.2,
-  ))
+  testRoundtrip('30° around (1,1,0)', quatFromAxisAngle(1 / Math.SQRT2, 1 / Math.SQRT2, 0, Math.PI / 6))
+  testRoundtrip(
+    'arbitrary rotation',
+    quatFromAxisAngle(0.2672612419124244, 0.5345224838248488, 0.8017837257372732, 1.2),
+  )
   // Note: 90° around X (rx=π/2) is gimbal lock for ZXY order — the euler→matrix
   // path amplifies float32 precision loss through asin near ±1. The direct
   // quaternion→matrix path (m4FromQuatTRS) doesn't have this issue. This is a

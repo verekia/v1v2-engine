@@ -44,7 +44,11 @@ export class World {
 
   addTransform(
     e: number,
-    opts?: { position?: [number, number, number]; rotation?: [number, number, number]; scale?: [number, number, number] },
+    opts?: {
+      position?: [number, number, number]
+      rotation?: [number, number, number]
+      scale?: [number, number, number]
+    },
   ): void {
     this.componentMask[e]! |= TRANSFORM
     const p = opts?.position ?? [0, 0, 0]
