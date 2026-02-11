@@ -157,6 +157,36 @@ export function m4Perspective(
   out[o + 15] = 0
 }
 
+// WebGL2 perspective: depth range [-1,1] instead of WebGPU's [0,1]
+export function m4PerspectiveGL(
+  out: Float32Array,
+  o: number,
+  fovY: number,
+  aspect: number,
+  near: number,
+  far: number,
+): void {
+  const f = 1.0 / Math.tan(fovY / 2)
+  const rangeInv = 1.0 / (near - far)
+
+  out[o] = f / aspect
+  out[o + 1] = 0
+  out[o + 2] = 0
+  out[o + 3] = 0
+  out[o + 4] = 0
+  out[o + 5] = f
+  out[o + 6] = 0
+  out[o + 7] = 0
+  out[o + 8] = 0
+  out[o + 9] = 0
+  out[o + 10] = (far + near) * rangeInv
+  out[o + 11] = -1
+  out[o + 12] = 0
+  out[o + 13] = 0
+  out[o + 14] = 2 * near * far * rangeInv
+  out[o + 15] = 0
+}
+
 export function m4LookAt(
   out: Float32Array,
   o: number,

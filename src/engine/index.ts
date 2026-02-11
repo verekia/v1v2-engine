@@ -1,6 +1,7 @@
-export { initGPU } from './gpu.ts'
+export { createRenderer } from './gpu.ts'
 export { Renderer } from './renderer.ts'
-export type { RenderScene } from './renderer.ts'
+export { WebGLRenderer } from './webgl-renderer.ts'
+export type { BackendType, IRenderer, RenderScene } from './renderer.ts'
 export { OrbitControls } from './orbit-controls.ts'
 export { loadGlb } from './gltf.ts'
 export type { GltfMesh, GltfSkin, GltfAnimation, GltfAnimationChannel, GltfNodeTransform, GlbResult } from './gltf.ts'
@@ -22,6 +23,7 @@ export {
   m4Identity,
   m4Multiply,
   m4Perspective,
+  m4PerspectiveGL,
   m4LookAt,
   m4ExtractFrustumPlanes,
   m4FromTRS,

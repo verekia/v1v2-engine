@@ -1,4 +1,4 @@
-import { m4Multiply, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
+import { m4Multiply, m4Perspective, m4ExtractFrustumPlanes, frustumContainsSphere } from './math.ts'
 import { lambertShader, skinnedLambertShader } from './shaders.ts'
 
 import type { SkinInstance } from './skin.ts'
@@ -7,6 +7,25 @@ const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
 const MAX_SKINNED_ENTITIES = 64
+
+export type BackendType = 'webgpu' | 'webgl'
+
+export interface IRenderer {
+  readonly backendType: BackendType
+  drawCalls: number
+  perspective(out: Float32Array, o: number, fovY: number, aspect: number, near: number, far: number): void
+  registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array): void
+  registerSkinnedGeometry(
+    id: number,
+    vertices: Float32Array,
+    indices: Uint16Array | Uint32Array,
+    joints: Uint8Array,
+    weights: Float32Array,
+  ): void
+  render(scene: RenderScene): void
+  resize(w: number, h: number): void
+  destroy(): void
+}
 
 export interface RenderScene {
   cameraView: Float32Array
@@ -40,7 +59,9 @@ interface SkinnedGeometryGPU extends GeometryGPU {
   skinBuffer: GPUBuffer
 }
 
-export class Renderer {
+export class Renderer implements IRenderer {
+  readonly backendType = 'webgpu' as const
+
   private device: GPUDevice
   private context: GPUCanvasContext
   private pipeline: GPURenderPipeline
@@ -237,6 +258,10 @@ export class Renderer {
       format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
     })
+  }
+
+  perspective(out: Float32Array, o: number, fovY: number, aspect: number, near: number, far: number): void {
+    m4Perspective(out, o, fovY, aspect, near, far)
   }
 
   resize(w: number, h: number): void {
@@ -524,5 +549,25 @@ export class Renderer {
 
     pass.end()
     device.queue.submit([encoder.finish()])
+  }
+
+  destroy(): void {
+    for (const geo of this.geometries.values()) {
+      geo.vertexBuffer.destroy()
+      geo.indexBuffer.destroy()
+    }
+    for (const geo of this.skinnedGeometries.values()) {
+      geo.vertexBuffer.destroy()
+      geo.indexBuffer.destroy()
+      geo.skinBuffer.destroy()
+    }
+    this.geometries.clear()
+    this.skinnedGeometries.clear()
+    this.cameraBuffer.destroy()
+    this.modelBuffer.destroy()
+    this.lightingBuffer.destroy()
+    this.jointBuffer.destroy()
+    this.depthTexture.destroy()
+    this.device.destroy()
   }
 }

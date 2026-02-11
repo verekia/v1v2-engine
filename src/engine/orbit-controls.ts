@@ -93,7 +93,7 @@ export class OrbitControls {
     this.updateEye()
   }
 
-  private updateEye(): void {
+  updateEye(): void {
     const cosPhi = Math.cos(this.phi)
     this.eye[0] = this.targetX + this.radius * cosPhi * Math.sin(this.theta)
     this.eye[1] = this.targetY + this.radius * cosPhi * Math.cos(this.theta)
