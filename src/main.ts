@@ -1,6 +1,7 @@
-import { World, TRANSFORM, MESH_INSTANCE, CAMERA, INPUT_RECEIVER, SKINNED, UNLIT } from './ecs/index.ts'
-import { InputManager } from './ecs/index.ts'
 import {
+  Scene,
+  Mesh,
+  InputManager,
   createRenderer,
   OrbitControls,
   loadGlb,
@@ -12,14 +13,13 @@ import {
   mergeGeometries,
   cubeVertices,
   cubeIndices,
-  m4FromTRS,
   m4LookAt,
   m4Multiply,
   v3Normalize,
   v3Scale,
 } from './engine/index.ts'
 
-import type { BackendType, IRenderer, RenderScene, SkinInstance } from './engine/index.ts'
+import type { BackendType, IRenderer } from './engine/index.ts'
 
 const MOVE_SPEED = 3
 const MEGAXE_GEO_ID = 2
@@ -85,7 +85,7 @@ type GeoReg =
 
 export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Persistent state (survives backend switches) ───────────────────
-  const world = new World()
+  const scene = new Scene()
   const input = new InputManager()
   const geoRegs: GeoReg[] = []
   const webgpuAvailable = !!navigator.gpu
@@ -189,17 +189,21 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const skySphere = createSphereGeometry(16, 24, true)
   trackGeo(SKY_GEO_ID, skySphere.vertices, skySphere.indices)
 
-  // ── Camera entity ─────────────────────────────────────────────────
-  const cam = world.createEntity()
-  world.addTransform(cam, { position: [50, 70, 5] })
-  world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 5000 })
-  world.activeCamera = cam
+  // ── Camera config ───────────────────────────────────────────────────
+  const fov = (60 * Math.PI) / 180
+  const near = 0.1
+  const far = 5000
 
   // ── Sky sphere ──────────────────────────────────────────────────────
-  const sky = world.createEntity()
-  world.addTransform(sky, { position: [50, 80, 0], scale: [1500, 1500, 1500] })
-  world.addMeshInstance(sky, { geometryId: SKY_GEO_ID, color: [85 / 255, 221 / 255, 1] })
-  world.addUnlit(sky)
+  scene.add(
+    new Mesh({
+      geometryId: SKY_GEO_ID,
+      position: [50, 80, 0],
+      scale: [1500, 1500, 1500],
+      color: [85 / 255, 221 / 255, 1],
+      unlit: true,
+    }),
+  )
 
   // ── Load static GLB (megaxe + Eden) ───────────────────────────────
   const megaxeColors = new Map<number, [number, number, number]>([
@@ -211,12 +215,17 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
   if (megaxe) {
     trackGeo(MEGAXE_GEO_ID, megaxe.vertices, megaxe.indices)
-    const axe = world.createEntity()
-    world.addTransform(axe, { position: [44, 80, 0], scale: megaxe.scale })
-    world.addMeshInstance(axe, { geometryId: MEGAXE_GEO_ID, color: [1, 1, 1] })
+    scene.add(
+      new Mesh({
+        geometryId: MEGAXE_GEO_ID,
+        position: [44, 80, 0],
+        scale: megaxe.scale,
+        color: [1, 1, 1],
+      }),
+    )
   }
 
-  // ── Eden entity (merged into 1 draw call) ──────────────────────
+  // ── Eden (merged into 1 draw call) ──────────────────────────────
   const edenMeshes = glbMeshes.filter(m => m.name.startsWith('Eden_'))
   if (edenMeshes.length > 0) {
     const merged = mergeGeometries(
@@ -227,16 +236,22 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       })),
     )
     trackGeo(EDEN_GEO_START, merged.vertices, merged.indices)
-    const eden = world.createEntity()
-    world.addTransform(eden, { position: [0, 0, 0], scale: edenMeshes[0]!.scale })
-    world.addMeshInstance(eden, { geometryId: EDEN_GEO_START, color: [1, 1, 1] })
+    scene.add(
+      new Mesh({
+        geometryId: EDEN_GEO_START,
+        position: [0, 0, 0],
+        scale: edenMeshes[0]!.scale,
+        color: [1, 1, 1],
+      }),
+    )
   }
 
   // ── Load player GLB ───────────────────────────────────────────────
-  const skinInstances: SkinInstance[] = []
   const animCycleCallbacks: ((dt: number) => void)[] = []
   const playerResult = await loadGlb('/player-bundle.glb')
   const bodyMesh = playerResult.meshes.find(m => m.name === 'Body' && m.skinIndex !== undefined)
+
+  let player: Mesh | undefined
 
   if (bodyMesh && bodyMesh.skinJoints && bodyMesh.skinWeights && bodyMesh.skinIndex !== undefined) {
     trackSkinnedGeo(PLAYER_BODY_GEO_ID, bodyMesh.vertices, bodyMesh.indices, bodyMesh.skinJoints, bodyMesh.skinWeights)
@@ -254,14 +269,19 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     const skinInst = createSkinInstance(skeleton, animIndices[0]!)
     updateSkinInstance(skinInst, playerResult.animations, 0) // compute initial joint matrices
-    skinInstances.push(skinInst)
+    scene.skinInstances.push(skinInst)
 
-    // Player entity (replaces the cube)
-    const player = world.createEntity()
-    world.addTransform(player, { position: [42, 80, 0], scale: bodyMesh.scale })
-    world.addMeshInstance(player, { geometryId: PLAYER_BODY_GEO_ID, color: [1, 1, 1] })
-    world.addSkinned(player, 0)
-    world.addInputReceiver(player)
+    // Player mesh (skinned + movable via WASD)
+    player = scene.add(
+      new Mesh({
+        geometryId: PLAYER_BODY_GEO_ID,
+        position: [42, 80, 0],
+        scale: bodyMesh.scale,
+        color: [1, 1, 1],
+        skinned: true,
+        skinInstanceId: 0,
+      }),
+    )
 
     // Cycle through animations every second with 0.2s crossfade
     let animCycleIndex = 0
@@ -287,20 +307,20 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     [1, 0.8, 0.1],
     [0.9, 0.3, 0.9],
   ]
-  const cubeEntities: number[] = []
+  const cubes: Mesh[] = []
   for (let i = 0; i < CUBE_COUNT; i++) {
-    const cube = world.createEntity()
     const angle = (i / CUBE_COUNT) * Math.PI * 2
     const x = 50 + Math.cos(angle) * 4
     const y = 80 + Math.sin(angle) * 4
-    world.addTransform(cube, { position: [x, y, 3] })
-    world.addMeshInstance(cube, { geometryId: CUBE_GEO_ID, color: cubeColors[i]!, alpha: 0.5 })
-    cubeEntities.push(cube)
+    const cube = scene.add(
+      new Mesh({ geometryId: CUBE_GEO_ID, position: [x, y, 3], color: cubeColors[i]!, alpha: 0.5 }),
+    )
+    cubes.push(cube)
   }
 
   // ── Lighting ──────────────────────────────────────────────────────
-  world.setDirectionalLight([-1, -1, -2.5], [0.3, 0.3, 0.3])
-  world.setAmbientLight([0.95, 0.95, 0.95])
+  scene.setDirectionalLight([-1, -1, -2.5], [0.3, 0.3, 0.3])
+  scene.setAmbientLight([0.95, 0.95, 0.95])
 
   // ── Stats overlay ────────────────────────────────────────────────
   const stats = document.createElement('div')
@@ -352,17 +372,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   // ── Resize handling ───────────────────────────────────────────────
   observeResize()
 
-  // ── Pre-allocate render masks ─────────────────────────────────────
-  const MAX_ENTITIES = 10_000
-  const renderMask = new Uint8Array(MAX_ENTITIES)
-  const skinnedMask = new Uint8Array(MAX_ENTITIES)
-  const unlitMask = new Uint8Array(MAX_ENTITIES)
-  const meshMask = TRANSFORM | MESH_INSTANCE
-
   // ── Game loop ─────────────────────────────────────────────────────
   let lastTime = performance.now()
-
-  const inputMask = TRANSFORM | INPUT_RECEIVER
 
   function loop(now: number) {
     if (switching) {
@@ -372,45 +383,33 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     const dt = Math.min((now - lastTime) / 1000, 0.1) // cap delta
     lastTime = now
 
-    // ── Input system ──────────────────────────────────────────────
-    for (let i = 0; i < world.entityCount; i++) {
-      if ((world.componentMask[i]! & inputMask) !== inputMask) continue
-      const pi = i * 3
-      if (input.isDown('KeyW')) world.positions[pi + 1]! += MOVE_SPEED * dt
-      if (input.isDown('KeyS')) world.positions[pi + 1]! -= MOVE_SPEED * dt
-      if (input.isDown('KeyA')) world.positions[pi]! -= MOVE_SPEED * dt
-      if (input.isDown('KeyD')) world.positions[pi]! += MOVE_SPEED * dt
+    // ── Input ───────────────────────────────────────────────────────
+    if (player) {
+      if (input.isDown('KeyW')) player.position[1]! += MOVE_SPEED * dt
+      if (input.isDown('KeyS')) player.position[1]! -= MOVE_SPEED * dt
+      if (input.isDown('KeyA')) player.position[0]! -= MOVE_SPEED * dt
+      if (input.isDown('KeyD')) player.position[0]! += MOVE_SPEED * dt
     }
 
     // ── Rotate transparent cubes ─────────────────────────────────
-    for (const e of cubeEntities) {
-      world.rotations[e * 3 + 2]! += dt
+    for (const cube of cubes) {
+      cube.rotation[2]! += dt
     }
 
     // ── Animation cycling ─────────────────────────────────────────
     for (const cb of animCycleCallbacks) cb(dt)
 
-    // ── Animation system ──────────────────────────────────────────
-    for (const inst of skinInstances) {
+    // ── Animation update ──────────────────────────────────────────
+    for (const inst of scene.skinInstances) {
       updateSkinInstance(inst, playerResult.animations, dt)
     }
 
-    // ── Transform system ──────────────────────────────────────────
-    for (let i = 0; i < world.entityCount; i++) {
-      if (!(world.componentMask[i]! & TRANSFORM)) continue
-      m4FromTRS(world.worldMatrices, i * 16, world.positions, i * 3, world.rotations, i * 3, world.scales, i * 3)
-    }
+    // ── Camera (orbit controls) ──────────────────────────────────
+    m4LookAt(scene.viewMatrix, 0, orbit.eye, 0, orbit.target, 0, UP, 0)
+    renderer.perspective(scene.projMatrix, 0, fov, aspect, near, far)
 
-    // ── Camera system (orbit controls) ─────────────────────────────
-    for (let i = 0; i < world.entityCount; i++) {
-      if (!(world.componentMask[i]! & CAMERA)) continue
-      m4LookAt(world.viewMatrices, i * 16, orbit.eye, 0, orbit.target, 0, UP, 0)
-      renderer.perspective(world.projMatrices, i * 16, world.fovs[i]!, aspect, world.nears[i]!, world.fars[i]!)
-    }
-
-    // ── Shadow: compute light VP matrix ────────────────────────────
-    // Fixed center covering the Eden map — lightTarget is a constant
-    v3Normalize(lightDirNorm, 0, world.directionalLightDir, 0)
+    // ── Shadow: compute light VP matrix ──────────────────────────
+    v3Normalize(lightDirNorm, 0, scene.lightDirection, 0)
     v3Scale(lightEye, 0, lightDirNorm, 0, -SHADOW_DISTANCE)
     lightEye[0]! += lightTarget[0]!
     lightEye[1]! += lightTarget[1]!
@@ -419,40 +418,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     renderer.ortho(lightProj, 0, -SHADOW_EXTENT, SHADOW_EXTENT, -SHADOW_EXTENT, SHADOW_EXTENT, SHADOW_NEAR, SHADOW_FAR)
     m4Multiply(lightVP, 0, lightProj, 0, lightView, 0)
 
-    // ── Build render masks ──────────────────────────────────────────
-    for (let i = 0; i < world.entityCount; i++) {
-      const mask = world.componentMask[i]!
-      renderMask[i] = (mask & meshMask) === meshMask ? 1 : 0
-      skinnedMask[i] = mask & SKINNED ? 1 : 0
-      unlitMask[i] = mask & UNLIT ? 1 : 0
-    }
-
-    // ── Render ────────────────────────────────────────────────────
-    const c = world.activeCamera
-    const scene: RenderScene = {
-      cameraView: world.viewMatrices,
-      cameraViewOffset: c * 16,
-      cameraProj: world.projMatrices,
-      cameraProjOffset: c * 16,
-      lightDirection: world.directionalLightDir,
-      lightDirColor: world.directionalLightColor,
-      lightAmbientColor: world.ambientLightColor,
-      entityCount: world.entityCount,
-      renderMask,
-      skinnedMask,
-      unlitMask,
-      positions: world.positions,
-      scales: world.scales,
-      worldMatrices: world.worldMatrices,
-      colors: world.colors,
-      alphas: world.alphas,
-      geometryIds: world.geometryIds,
-      skinInstanceIds: world.skinInstanceIds,
-      skinInstances,
-      shadowLightViewProj: lightVP,
-      shadowBias: 0.0001,
-    }
-    renderer.render(scene)
+    // ── Render ──────────────────────────────────────────────────────
+    renderer.render(scene.buildRenderScene({ lightViewProj: lightVP, bias: 0.0001 }))
     frames++
 
     requestAnimationFrame(loop)
