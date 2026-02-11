@@ -22,7 +22,9 @@ When passing TypedArrays to `device.queue.writeBuffer`, cast the buffer: `writeB
 
 ## Architecture
 
-**Mana Engine** is a minimal WebGPU ECS game engine. Next.js serves a single page (`pages/index.tsx`) that mounts a fullscreen `<canvas>` and dynamically imports the engine (`src/main.ts`) to avoid SSR issues with browser APIs.
+**Mana Engine** is a minimal WebGPU ECS game engine using a **right-handed Z-up coordinate system** (Blender convention): +X right, +Y forward, +Z up. glTF assets are exported from Blender with the "Y up" option unchecked to preserve Z-up coordinates — no axis conversion needed at load time.
+
+Next.js serves a single page (`pages/index.tsx`) that mounts a fullscreen `<canvas>` and dynamically imports the engine (`src/main.ts`) to avoid SSR issues with browser APIs.
 
 The engine is pure TypeScript with no React dependency. Engine code is split into two independent libraries under `src/`:
 
@@ -42,11 +44,11 @@ The **`RenderScene` bridge pattern** (`renderer.ts`): The renderer accepts a `Re
 
 ### Key design patterns:
 
-- **Zero-allocation math** (`engine/math.ts`): All vec3/mat4 functions write to a pre-allocated `Float32Array` at a given offset. No temp objects, no GC pressure in the hot path. Includes `quatToEulerYXZ` for glTF quaternion → Euler conversion matching the Y×X×Z rotation order. Animation math: `v3Lerp`, `quatSlerp`, `m4FromQuatTRS` (builds mat4 from quaternion + TRS).
+- **Zero-allocation math** (`engine/math.ts`): All vec3/mat4 functions write to a pre-allocated `Float32Array` at a given offset. No temp objects, no GC pressure in the hot path. Includes `quatToEulerZXY` for glTF quaternion → Euler conversion matching the Z×X×Y rotation order (Z-up coordinate system). Animation math: `v3Lerp`, `quatSlerp`, `m4FromQuatTRS` (builds mat4 from quaternion + TRS).
 - **Structure-of-Arrays ECS** (`ecs/world.ts`): Component data stored as parallel TypedArrays (e.g., `positions: Float32Array[MAX*3]`), not per-entity objects. Component presence tracked via bitmasks (`TRANSFORM = 1 << 0`, `SKINNED = 1 << 4`, etc.) with inline iteration — no query abstraction. Skinned entities store a `skinInstanceIds` index into an external `SkinInstance[]` array.
 - **Dynamic uniform buffer** (`engine/renderer.ts`): Per-entity model data packed into 256-byte aligned slots in a single GPU buffer, bound via dynamic offsets to avoid per-entity bind group allocation.
 - **Frustum culling** (`engine/renderer.ts` + `engine/math.ts`): Gribb-Hartmann plane extraction from the VP matrix, bounding sphere test per entity before upload and draw.
-- **OrbitControls** (`engine/orbit-controls.ts`): Spherical coordinates (theta/phi/radius) around a target point. Outputs `eye` and `target` Float32Arrays consumed by the camera system's `m4LookAt`. Left-drag orbits, right-drag pans, scroll zooms.
+- **OrbitControls** (`engine/orbit-controls.ts`): Spherical coordinates (theta/phi/radius) around a target point with Z as the vertical axis. Outputs `eye` and `target` Float32Arrays consumed by the camera system's `m4LookAt`. Left-drag orbits, right-drag pans (in XY plane + Z), scroll zooms.
 - **GLB/glTF loader** (`engine/gltf.ts`): Loads `.glb` files with Draco mesh compression (`KHR_draco_mesh_compression`). Draco WASM decoder loaded at runtime from `public/draco-1.5.7/` via `<script>` tag (singleton, no npm package). Supports reading custom `_MATERIALINDEX` vertex attribute from Draco data to assign per-vertex colors via a `materialColors` map. Outputs interleaved vertices matching the engine's format. Falls back to standard accessor-based decoding for non-Draco primitives. Returns `GlbResult { meshes, skins, animations, nodeTransforms }` — parses node hierarchy, skins (joints + inverseBindMatrices), animations (channels with keyframe samplers), and JOINTS_0/WEIGHTS_0 attributes for skinned meshes.
 - **GPU Skinning** (`engine/skin.ts` + `engine/renderer.ts`): `Skeleton` holds joint node indices + inverse bind matrices. `SkinInstance` holds per-instance animation state + pre-allocated scratch buffers. `updateSkinInstance()` samples animation keyframes (binary search + lerp/slerp), traverses node hierarchy parent-first to compute global matrices, then multiplies by inverse bind matrices. Renderer uses a separate `skinnedPipeline` with two vertex buffers (buffer 0: pos/norm/color stride 36, buffer 1: joints uint8x4 + weights float32x4 stride 20) and a `read-only-storage` joint matrices buffer (group 3, dynamic offset, 128 joints × 64 bytes = 8192 per slot).
 

@@ -5,22 +5,22 @@
 
 // prettier-ignore
 export const cubeVertices = new Float32Array([
-  // +Z face (front)
+  // +Z face (top)
   -1, -1,  1,   0,  0,  1,   1, 1, 1,
    1, -1,  1,   0,  0,  1,   1, 1, 1,
    1,  1,  1,   0,  0,  1,   1, 1, 1,
   -1,  1,  1,   0,  0,  1,   1, 1, 1,
-  // -Z face (back)
+  // -Z face (bottom)
    1, -1, -1,   0,  0, -1,   1, 1, 1,
   -1, -1, -1,   0,  0, -1,   1, 1, 1,
   -1,  1, -1,   0,  0, -1,   1, 1, 1,
    1,  1, -1,   0,  0, -1,   1, 1, 1,
-  // +Y face (top)
+  // +Y face (front)
   -1,  1,  1,   0,  1,  0,   1, 1, 1,
    1,  1,  1,   0,  1,  0,   1, 1, 1,
    1,  1, -1,   0,  1,  0,   1, 1, 1,
   -1,  1, -1,   0,  1,  0,   1, 1, 1,
-  // -Y face (bottom)
+  // -Y face (back)
   -1, -1, -1,   0, -1,  0,   1, 1, 1,
    1, -1, -1,   0, -1,  0,   1, 1, 1,
    1, -1,  1,   0, -1,  0,   1, 1, 1,
@@ -39,10 +39,10 @@ export const cubeVertices = new Float32Array([
 
 // prettier-ignore
 export const cubeIndices = new Uint16Array([
-   0,  1,  2,   0,  2,  3,   // +Z
-   4,  5,  6,   4,  6,  7,   // -Z
-   8,  9, 10,   8, 10, 11,   // +Y
-  12, 13, 14,  12, 14, 15,   // -Y
+   0,  1,  2,   0,  2,  3,   // +Z (top)
+   4,  5,  6,   4,  6,  7,   // -Z (bottom)
+   8,  9, 10,   8, 10, 11,   // +Y (front)
+  12, 13, 14,  12, 14, 15,   // -Y (back)
   16, 17, 18,  16, 18, 19,   // +X
   20, 21, 22,  20, 22, 23,   // -X
 ])
@@ -64,8 +64,8 @@ export function createSphereGeometry(
     for (let sl = 0; sl <= slices; sl++) {
       const theta = (sl / slices) * Math.PI * 2
       const nx = sinP * Math.cos(theta)
-      const ny = cosP
-      const nz = sinP * Math.sin(theta)
+      const ny = sinP * Math.sin(theta)
+      const nz = cosP
       // position = normal (unit sphere)
       vertices[vi++] = nx
       vertices[vi++] = ny

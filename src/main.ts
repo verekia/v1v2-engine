@@ -13,7 +13,7 @@ const SPHERE_GEO_ID = 1
 const MEGAXE_GEO_ID = 2
 const EDEN_GEO_START = 3
 const PLAYER_BODY_GEO_ID = 4
-const UP = new Float32Array([0, 1, 0])
+const UP = new Float32Array([0, 0, 1])
 
 const EDEN_COLORS: Record<string, [number, number, number]> = {
   Eden_1: [0.78, 0.44, 0.25],
@@ -58,7 +58,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Camera entity ─────────────────────────────────────────────────
   const cam = world.createEntity()
-  world.addTransform(cam, { position: [0, 3, 8] })
+  world.addTransform(cam, { position: [0, -8, 3] })
   world.addCamera(cam, { fov: (60 * Math.PI) / 180, near: 0.1, far: 500 })
   world.activeCamera = cam
 
@@ -130,7 +130,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     world.addInputReceiver(player)
   }
 
-  // ── Sphere entities (behind the cube, negative Z) ─────────────────
+  // ── Sphere entities (behind the player, positive Y) ──────────────
   const SPHERE_COLS = 7
   const SPHERE_ROWS = 5
   const SPACING = 2.5
@@ -138,8 +138,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     for (let col = 0; col < SPHERE_COLS; col++) {
       const s = world.createEntity()
       const x = (col - (SPHERE_COLS - 1) / 2) * SPACING
-      const y = (row - (SPHERE_ROWS - 1) / 2) * SPACING
-      world.addTransform(s, { position: [x, y, -8], scale: [0.8, 0.8, 0.8] })
+      const z = (row - (SPHERE_ROWS - 1) / 2) * SPACING
+      world.addTransform(s, { position: [x, 8, z], scale: [0.8, 0.8, 0.8] })
       // Vary color by position
       const r = 0.3 + (col / (SPHERE_COLS - 1)) * 0.5
       const g = 0.3 + (row / (SPHERE_ROWS - 1)) * 0.5
@@ -205,8 +205,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     for (let i = 0; i < world.entityCount; i++) {
       if ((world.componentMask[i]! & inputMask) !== inputMask) continue
       const pi = i * 3
-      if (input.isDown('KeyW')) world.positions[pi + 2]! -= MOVE_SPEED * dt
-      if (input.isDown('KeyS')) world.positions[pi + 2]! += MOVE_SPEED * dt
+      if (input.isDown('KeyW')) world.positions[pi + 1]! += MOVE_SPEED * dt
+      if (input.isDown('KeyS')) world.positions[pi + 1]! -= MOVE_SPEED * dt
       if (input.isDown('KeyA')) world.positions[pi]! -= MOVE_SPEED * dt
       if (input.isDown('KeyD')) world.positions[pi]! += MOVE_SPEED * dt
     }

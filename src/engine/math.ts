@@ -253,8 +253,8 @@ export function frustumContainsSphere(
   return true
 }
 
-// Convert glTF quaternion [x,y,z,w] to Euler angles matching m4FromTRS rotation order (Y * X * Z)
-export function quatToEulerYXZ(
+// Convert glTF quaternion [x,y,z,w] to Euler angles matching m4FromTRS rotation order (Z * X * Y)
+export function quatToEulerZXY(
   out: Float32Array,
   o: number,
   q: Float32Array,
@@ -262,14 +262,14 @@ export function quatToEulerYXZ(
 ): void {
   const qx = q[qo]!, qy = q[qo + 1]!, qz = q[qo + 2]!, qw = q[qo + 3]!
 
-  // R(1,2) = 2(qy*qz - qw*qx)
-  const r12 = 2 * (qy * qz - qw * qx)
-  // rx = asin(-R(1,2)), clamped for numerical safety
-  out[o] = Math.asin(-Math.max(-1, Math.min(1, r12)))
-  // ry = atan2(R(0,2), R(2,2))
-  out[o + 1] = Math.atan2(2 * (qx * qz + qw * qy), 1 - 2 * (qx * qx + qy * qy))
-  // rz = atan2(R(1,0), R(1,1))
-  out[o + 2] = Math.atan2(2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz))
+  // R(2,1) = 2(qy*qz + qw*qx)
+  const r21 = 2 * (qy * qz + qw * qx)
+  // rx = asin(R(2,1)), clamped for numerical safety
+  out[o] = Math.asin(Math.max(-1, Math.min(1, r21)))
+  // ry = atan2(-R(2,0), R(2,2))
+  out[o + 1] = Math.atan2(2 * (qw * qy - qx * qz), 1 - 2 * (qx * qx + qy * qy))
+  // rz = atan2(-R(0,1), R(1,1))
+  out[o + 2] = Math.atan2(2 * (qw * qz - qx * qy), 1 - 2 * (qx * qx + qz * qz))
 }
 
 // ── vec3 lerp ───────────────────────────────────────────────────────
@@ -392,20 +392,20 @@ export function m4FromTRS(
   const cy = Math.cos(ry), syr = Math.sin(ry)
   const cz = Math.cos(rz), szr = Math.sin(rz)
 
-  // Rotation order: Y * X * Z
-  out[o]     = (cy * cz + syr * sxr * szr) * sx
-  out[o + 1] = (cx * szr) * sx
-  out[o + 2] = (-syr * cz + cy * sxr * szr) * sx
+  // Rotation order: Z * X * Y  (Z-up: yaw around Z, pitch around X, roll around Y)
+  out[o]     = (cz * cy - szr * sxr * syr) * sx
+  out[o + 1] = (szr * cy + cz * sxr * syr) * sx
+  out[o + 2] = (-cx * syr) * sx
   out[o + 3] = 0
 
-  out[o + 4] = (cy * -szr + syr * sxr * cz) * sy
-  out[o + 5] = (cx * cz) * sy
-  out[o + 6] = (syr * szr + cy * sxr * cz) * sy
+  out[o + 4] = (-szr * cx) * sy
+  out[o + 5] = (cz * cx) * sy
+  out[o + 6] = (sxr) * sy
   out[o + 7] = 0
 
-  out[o + 8]  = (syr * cx) * sz
-  out[o + 9]  = (-sxr) * sz
-  out[o + 10] = (cy * cx) * sz
+  out[o + 8]  = (cz * syr + szr * sxr * cy) * sz
+  out[o + 9]  = (szr * syr - cz * sxr * cy) * sz
+  out[o + 10] = (cx * cy) * sz
   out[o + 11] = 0
 
   out[o + 12] = pos[po]!
