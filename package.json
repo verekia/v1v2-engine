@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "start": "serve out",
     "postinstall": "bun typegen",
     "typegen": "next typegen",
     "typecheck": "tsgo",
@@ -27,6 +28,7 @@
     "@types/react-dom": "19.2.3",
     "@typescript/native-preview": "^7.0.0-dev.20260206.1",
     "@webgpu/types": "^0.1.69",
+    "babel-plugin-react-compiler": "1.0.0",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
     "postcss": "8.5.6",
