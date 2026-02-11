@@ -154,11 +154,19 @@ describe('Mesh', () => {
     expect(m.skinned).toBe(false)
     expect(m.skinInstanceId).toBe(-1)
     expect(m.aoMap).toBe(-1)
+    expect(m.bloom).toBe(0)
   })
 
   test('aoMap can be set via options', () => {
     const m = new Mesh({ geometry: 0, aoMap: 3 })
     expect(m.aoMap).toBe(3)
+  })
+
+  test('bloom defaults to 0 and can be set via options', () => {
+    const m0 = new Mesh({ geometry: 0 })
+    expect(m0.bloom).toBe(0)
+    const m1 = new Mesh({ geometry: 0, bloom: 1.5 })
+    expect(m1.bloom).toBe(1.5)
   })
 })
 
@@ -314,6 +322,33 @@ describe('Scene shadow config', () => {
   })
 })
 
+// ── Scene: bloom config ──────────────────────────────────────────────────────
+
+describe('Scene bloom config', () => {
+  test('bloom defaults to disabled with intensity=1, threshold=0, radius=1, whiten=0', () => {
+    const scene = new Scene(createMockRenderer(), createMockCanvas(), 100)
+    expect(scene.bloom.enabled).toBe(false)
+    expect(scene.bloom.intensity).toBe(1)
+    expect(scene.bloom.threshold).toBe(0)
+    expect(scene.bloom.radius).toBe(1)
+    expect(scene.bloom.whiten).toBe(0)
+  })
+
+  test('bloom config is mutable', () => {
+    const scene = new Scene(createMockRenderer(), createMockCanvas(), 100)
+    scene.bloom.enabled = true
+    scene.bloom.intensity = 2.5
+    scene.bloom.threshold = 0.3
+    scene.bloom.radius = 5
+    scene.bloom.whiten = 0.7
+    expect(scene.bloom.enabled).toBe(true)
+    expect(scene.bloom.intensity).toBe(2.5)
+    expect(scene.bloom.threshold).toBe(0.3)
+    expect(scene.bloom.radius).toBe(5)
+    expect(scene.bloom.whiten).toBe(0.7)
+  })
+})
+
 // ── Scene: render ───────────────────────────────────────────────────────────
 
 describe('Scene render', () => {
@@ -459,6 +494,42 @@ describe('Scene render', () => {
     expect(rs.texturedMask[1]).toBe(1)
     expect(rs.aoMapIds[0]).toBe(-1)
     expect(rs.aoMapIds[1]).toBe(2)
+  })
+
+  test('render syncs bloom values and bloom config into RenderScene', () => {
+    const renderer = createMockRenderer()
+    const scene = new Scene(renderer, createMockCanvas(), 100)
+    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.add(new Mesh({ geometry: 0 }))
+    scene.add(new Mesh({ geometry: 0, bloom: 1.5 }))
+
+    scene.bloom.enabled = true
+    scene.bloom.intensity = 2.0
+    scene.bloom.threshold = 0.1
+    scene.bloom.radius = 5
+    scene.bloom.whiten = 0.6
+    scene.render()
+
+    const rs = renderer.lastRenderScene!
+    expect(rs.bloomEnabled).toBe(true)
+    expect(rs.bloomIntensity).toBe(2.0)
+    expect(rs.bloomThreshold).toBeCloseTo(0.1, 5)
+    expect(rs.bloomRadius).toBe(5)
+    expect(rs.bloomWhiten).toBeCloseTo(0.6, 5)
+    expect(rs.bloomValues![0]).toBe(0)
+    expect(rs.bloomValues![1]).toBeCloseTo(1.5, 5)
+  })
+
+  test('render without bloom sets bloomEnabled false', () => {
+    const renderer = createMockRenderer()
+    const scene = new Scene(renderer, createMockCanvas(), 100)
+    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.add(new Mesh({ geometry: 0 }))
+
+    scene.render()
+
+    const rs = renderer.lastRenderScene!
+    expect(rs.bloomEnabled).toBe(false)
   })
 
   test('render with shadow enabled sets shadowLightViewProj and bias', () => {

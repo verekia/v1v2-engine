@@ -2,14 +2,23 @@ import { m4Multiply, m4PerspectiveGL, m4OrthoGL, m4ExtractFrustumPlanes, frustum
 import {
   glLambertVS,
   glLambertFS,
+  glLambertMRTFS,
   glUnlitVS,
   glUnlitFS,
+  glUnlitMRTFS,
   glSkinnedLambertVS,
   glTexturedLambertVS,
   glTexturedLambertFS,
+  glTexturedLambertMRTFS,
   glShadowDepthVS,
   glSkinnedShadowDepthVS,
   glShadowDepthFS,
+  glBloomDownsampleVS,
+  glBloomDownsampleFS,
+  glBloomUpsampleVS,
+  glBloomUpsampleFS,
+  glBloomCompositeVS,
+  glBloomCompositeFS,
 } from './webgl-shaders.ts'
 
 import type { IRenderer, RenderScene } from './renderer.ts'
@@ -19,6 +28,7 @@ const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 8192 bytes per slot
 const MAX_SKINNED_ENTITIES = 64
 const SHADOW_MAP_SIZE = 2048
+const BLOOM_MIPS = 5
 
 // UBO binding points
 const UBO_CAMERA = 0
@@ -90,6 +100,45 @@ export class WebGLRenderer implements IRenderer {
   private shadowDepthProgram: WebGLProgram
   private shadowSkinnedDepthProgram: WebGLProgram
 
+  // MRT programs (bloom — 2 color targets)
+  private mrtStaticProgram: WebGLProgram
+  private mrtSkinnedProgram: WebGLProgram
+  private mrtUnlitProgram: WebGLProgram
+  private mrtTexturedProgram: WebGLProgram
+
+  // Bloom post-processing programs
+  private bloomDownsampleProgram: WebGLProgram
+  private bloomUpsampleProgram: WebGLProgram
+  private bloomCompositeProgram: WebGLProgram
+
+  // Bloom post-processing uniform locations
+  private bloomDsSrcTexLoc: WebGLUniformLocation | null
+  private bloomDsSrcTexelSizeLoc: WebGLUniformLocation | null
+  private bloomUsSrcTexLoc: WebGLUniformLocation | null
+  private bloomUsDestTexelSizeLoc: WebGLUniformLocation | null
+  private bloomUsOffsetLoc: WebGLUniformLocation | null
+  private bloomCompSceneTexLoc: WebGLUniformLocation | null
+  private bloomCompBloomTexLoc: WebGLUniformLocation | null
+  private bloomCompIntensityLoc: WebGLUniformLocation | null
+  private bloomCompThresholdLoc: WebGLUniformLocation | null
+
+  // Bloom FBO resources
+  private bloomMrtFBO: WebGLFramebuffer | null = null
+  private bloomSceneTexture: WebGLTexture | null = null
+  private bloomEmitTexture: WebGLTexture | null = null
+  private bloomDepthRB: WebGLRenderbuffer | null = null
+  private bloomMips: WebGLTexture[] = []
+  private bloomMipFBOs: WebGLFramebuffer[] = []
+  private bloomFullscreenVAO: WebGLVertexArrayObject
+  private bloomTexW = 0
+  private bloomTexH = 0
+
+  // MRT shadow map uniform locations
+  private mrtStaticShadowMapLoc: WebGLUniformLocation | null
+  private mrtSkinnedShadowMapLoc: WebGLUniformLocation | null
+  private mrtTexturedShadowMapLoc: WebGLUniformLocation | null
+  private mrtTexturedAoMapLoc: WebGLUniformLocation | null
+
   // UBOs
   private cameraUBO: WebGLBuffer
   private modelUBO: WebGLBuffer
@@ -136,8 +185,26 @@ export class WebGLRenderer implements IRenderer {
     this.shadowDepthProgram = createProgram(gl, glShadowDepthVS, glShadowDepthFS)
     this.shadowSkinnedDepthProgram = createProgram(gl, glSkinnedShadowDepthVS, glShadowDepthFS)
 
+    // ── Compile MRT programs ─────────────────────────────────────────
+    this.mrtStaticProgram = createProgram(gl, glLambertVS, glLambertMRTFS)
+    this.mrtSkinnedProgram = createProgram(gl, glSkinnedLambertVS, glLambertMRTFS)
+    this.mrtUnlitProgram = createProgram(gl, glUnlitVS, glUnlitMRTFS)
+    this.mrtTexturedProgram = createProgram(gl, glTexturedLambertVS, glTexturedLambertMRTFS)
+
+    // ── Compile bloom post-processing programs ───────────────────────
+    this.bloomDownsampleProgram = createProgram(gl, glBloomDownsampleVS, glBloomDownsampleFS)
+    this.bloomUpsampleProgram = createProgram(gl, glBloomUpsampleVS, glBloomUpsampleFS)
+    this.bloomCompositeProgram = createProgram(gl, glBloomCompositeVS, glBloomCompositeFS)
+
     // ── Bind UBO block indices ──────────────────────────────────────
-    for (const prog of [this.staticProgram, this.skinnedProgram, this.texturedProgram]) {
+    for (const prog of [
+      this.staticProgram,
+      this.skinnedProgram,
+      this.texturedProgram,
+      this.mrtStaticProgram,
+      this.mrtSkinnedProgram,
+      this.mrtTexturedProgram,
+    ]) {
       const cameraIdx = gl.getUniformBlockIndex(prog, 'Camera')
       if (cameraIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, cameraIdx, UBO_CAMERA)
 
@@ -148,17 +215,19 @@ export class WebGLRenderer implements IRenderer {
       if (lightIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, lightIdx, UBO_LIGHTING)
     }
 
-    // Unlit program uses Camera + Model only (no Lighting)
-    {
-      const cameraIdx = gl.getUniformBlockIndex(this.unlitProgram, 'Camera')
-      if (cameraIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(this.unlitProgram, cameraIdx, UBO_CAMERA)
-      const modelIdx = gl.getUniformBlockIndex(this.unlitProgram, 'Model')
-      if (modelIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(this.unlitProgram, modelIdx, UBO_MODEL)
+    // Unlit programs use Camera + Model only (no Lighting)
+    for (const prog of [this.unlitProgram, this.mrtUnlitProgram]) {
+      const cameraIdx = gl.getUniformBlockIndex(prog, 'Camera')
+      if (cameraIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, cameraIdx, UBO_CAMERA)
+      const modelIdx = gl.getUniformBlockIndex(prog, 'Model')
+      if (modelIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, modelIdx, UBO_MODEL)
     }
 
-    // Joint UBO only in skinned program
-    const jointIdx = gl.getUniformBlockIndex(this.skinnedProgram, 'JointMatrices')
-    if (jointIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(this.skinnedProgram, jointIdx, UBO_JOINTS)
+    // Joint UBO in skinned programs
+    for (const prog of [this.skinnedProgram, this.mrtSkinnedProgram]) {
+      const jointIdx = gl.getUniformBlockIndex(prog, 'JointMatrices')
+      if (jointIdx !== gl.INVALID_INDEX) gl.uniformBlockBinding(prog, jointIdx, UBO_JOINTS)
+    }
 
     // Shadow depth programs use Camera and Model UBOs
     for (const prog of [this.shadowDepthProgram, this.shadowSkinnedDepthProgram]) {
@@ -174,11 +243,28 @@ export class WebGLRenderer implements IRenderer {
     if (shadowJointIdx !== gl.INVALID_INDEX)
       gl.uniformBlockBinding(this.shadowSkinnedDepthProgram, shadowJointIdx, UBO_JOINTS)
 
-    // Shadow map sampler uniform locations
+    // Shadow map sampler uniform locations (regular programs)
     this.shadowMapLoc = gl.getUniformLocation(this.staticProgram, 'uShadowMap')
     this.shadowMapSkinnedLoc = gl.getUniformLocation(this.skinnedProgram, 'uShadowMap')
     this.texturedShadowMapLoc = gl.getUniformLocation(this.texturedProgram, 'uShadowMap')
     this.texturedAoMapLoc = gl.getUniformLocation(this.texturedProgram, 'uAoMap')
+
+    // Shadow map sampler uniform locations (MRT programs)
+    this.mrtStaticShadowMapLoc = gl.getUniformLocation(this.mrtStaticProgram, 'uShadowMap')
+    this.mrtSkinnedShadowMapLoc = gl.getUniformLocation(this.mrtSkinnedProgram, 'uShadowMap')
+    this.mrtTexturedShadowMapLoc = gl.getUniformLocation(this.mrtTexturedProgram, 'uShadowMap')
+    this.mrtTexturedAoMapLoc = gl.getUniformLocation(this.mrtTexturedProgram, 'uAoMap')
+
+    // Bloom post-processing uniform locations
+    this.bloomDsSrcTexLoc = gl.getUniformLocation(this.bloomDownsampleProgram, 'uSrcTex')
+    this.bloomDsSrcTexelSizeLoc = gl.getUniformLocation(this.bloomDownsampleProgram, 'uSrcTexelSize')
+    this.bloomUsSrcTexLoc = gl.getUniformLocation(this.bloomUpsampleProgram, 'uSrcTex')
+    this.bloomUsDestTexelSizeLoc = gl.getUniformLocation(this.bloomUpsampleProgram, 'uDestTexelSize')
+    this.bloomUsOffsetLoc = gl.getUniformLocation(this.bloomUpsampleProgram, 'uOffset')
+    this.bloomCompSceneTexLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uSceneTex')
+    this.bloomCompBloomTexLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uBloomTex')
+    this.bloomCompIntensityLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uIntensity')
+    this.bloomCompThresholdLoc = gl.getUniformLocation(this.bloomCompositeProgram, 'uThreshold')
 
     // ── Create UBOs ─────────────────────────────────────────────────
     this.cameraUBO = gl.createBuffer()!
@@ -222,6 +308,9 @@ export class WebGLRenderer implements IRenderer {
     gl.readBuffer(gl.NONE)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
 
+    // ── Bloom fullscreen VAO (empty — uses gl_VertexID) ──────────────
+    this.bloomFullscreenVAO = gl.createVertexArray()!
+
     // ── GL state ────────────────────────────────────────────────────
     gl.enable(gl.DEPTH_TEST)
     gl.depthFunc(gl.LESS)
@@ -249,6 +338,91 @@ export class WebGLRenderer implements IRenderer {
 
   resize(w: number, h: number): void {
     this.gl.viewport(0, 0, w, h)
+    this.destroyBloomTextures()
+  }
+
+  private ensureBloomTextures(w: number, h: number): void {
+    if (this.bloomTexW === w && this.bloomTexH === h && this.bloomMrtFBO) return
+    this.destroyBloomTextures()
+
+    const gl = this.gl
+
+    // Scene color texture (MRT attachment 0)
+    this.bloomSceneTexture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomSceneTexture)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
+    // Bloom emit texture (MRT attachment 1)
+    this.bloomEmitTexture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.bloomEmitTexture)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
+    // Depth renderbuffer
+    this.bloomDepthRB = gl.createRenderbuffer()!
+    gl.bindRenderbuffer(gl.RENDERBUFFER, this.bloomDepthRB)
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h)
+
+    // MRT FBO
+    this.bloomMrtFBO = gl.createFramebuffer()!
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMrtFBO)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.bloomSceneTexture, 0)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this.bloomEmitTexture, 0)
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.bloomDepthRB)
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+
+    // Mip chain: 5 levels at half/quarter/eighth/sixteenth/thirty-second
+    let mw = w,
+      mh = h
+    for (let i = 0; i < BLOOM_MIPS; i++) {
+      mw = Math.max(1, (mw / 2) | 0)
+      mh = Math.max(1, (mh / 2) | 0)
+
+      const tex = gl.createTexture()!
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, mw, mh)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      this.bloomMips.push(tex)
+
+      const fbo = gl.createFramebuffer()!
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+      this.bloomMipFBOs.push(fbo)
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, null)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+
+    this.bloomTexW = w
+    this.bloomTexH = h
+  }
+
+  private destroyBloomTextures(): void {
+    const gl = this.gl
+    if (this.bloomMrtFBO) gl.deleteFramebuffer(this.bloomMrtFBO)
+    if (this.bloomSceneTexture) gl.deleteTexture(this.bloomSceneTexture)
+    if (this.bloomEmitTexture) gl.deleteTexture(this.bloomEmitTexture)
+    if (this.bloomDepthRB) gl.deleteRenderbuffer(this.bloomDepthRB)
+    for (const tex of this.bloomMips) gl.deleteTexture(tex)
+    for (const fbo of this.bloomMipFBOs) gl.deleteFramebuffer(fbo)
+    this.bloomMrtFBO = null
+    this.bloomSceneTexture = null
+    this.bloomEmitTexture = null
+    this.bloomDepthRB = null
+    this.bloomMips = []
+    this.bloomMipFBOs = []
+    this.bloomTexW = 0
+    this.bloomTexH = 0
   }
 
   registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array): void {
@@ -530,8 +704,12 @@ export class WebGLRenderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
+      // bloom (float at offset 20) + bloomWhiten (float at offset 21)
+      const bloomVal = scene.bloomValues?.[i] ?? 0
+      modelSlot[20] = bloomVal
+      modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
 
-      gl.bufferSubData(gl.UNIFORM_BUFFER, i * MODEL_SLOT_SIZE, modelSlot, 0, 20)
+      gl.bufferSubData(gl.UNIFORM_BUFFER, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
     }
 
     // ── Upload joint matrices ────────────────────────────────────────
@@ -611,9 +789,132 @@ export class WebGLRenderer implements IRenderer {
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
     }
 
-    // ── Clear ────────────────────────────────────────────────────────
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    const useBloom = !!scene.bloomEnabled
 
+    if (useBloom) {
+      const w = gl.drawingBufferWidth
+      const h = gl.drawingBufferHeight
+      this.ensureBloomTextures(w, h)
+
+      // ── MRT scene pass ─────────────────────────────────────────────
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMrtFBO)
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+      gl.viewport(0, 0, w, h)
+      gl.clearColor(0.15, 0.15, 0.2, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+
+      this.drawCalls = this.drawScene(true, scene, planes, skinnedSlotMap)
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+
+      // ── Downsample chain ───────────────────────────────────────────
+      gl.disable(gl.DEPTH_TEST)
+      gl.disable(gl.CULL_FACE)
+      gl.bindVertexArray(this.bloomFullscreenVAO)
+      gl.useProgram(this.bloomDownsampleProgram)
+
+      let sw = w,
+        sh = h
+      for (let i = 0; i < BLOOM_MIPS; i++) {
+        const mw = Math.max(1, (sw / 2) | 0)
+        const mh = Math.max(1, (sh / 2) | 0)
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMipFBOs[i]!)
+        gl.viewport(0, 0, mw, mh)
+
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, i === 0 ? this.bloomEmitTexture! : this.bloomMips[i - 1]!)
+        gl.uniform1i(this.bloomDsSrcTexLoc, 0)
+        gl.uniform2f(this.bloomDsSrcTexelSizeLoc, 1 / sw, 1 / sh)
+
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+        sw = mw
+        sh = mh
+      }
+
+      // ── Upsample chain (additive blend) ────────────────────────────
+      gl.enable(gl.BLEND)
+      gl.blendFunc(gl.ONE, gl.ONE)
+
+      gl.useProgram(this.bloomUpsampleProgram)
+      const radius = scene.bloomRadius ?? 1
+
+      // Compute mip sizes
+      const mipW: number[] = [],
+        mipH: number[] = []
+      let tw = w,
+        th = h
+      for (let i = 0; i < BLOOM_MIPS; i++) {
+        tw = Math.max(1, (tw / 2) | 0)
+        th = Math.max(1, (th / 2) | 0)
+        mipW.push(tw)
+        mipH.push(th)
+      }
+
+      for (let i = 0; i < BLOOM_MIPS - 1; i++) {
+        const srcIdx = BLOOM_MIPS - 1 - i // source mip (lower res)
+        const dstIdx = BLOOM_MIPS - 2 - i // dest mip (higher res)
+        const destW = mipW[dstIdx]!,
+          destH = mipH[dstIdx]!
+        const srcW = mipW[srcIdx]!,
+          srcH = mipH[srcIdx]!
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomMipFBOs[dstIdx]!)
+        gl.viewport(0, 0, destW, destH)
+
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, this.bloomMips[srcIdx]!)
+        gl.uniform1i(this.bloomUsSrcTexLoc, 0)
+        gl.uniform2f(this.bloomUsDestTexelSizeLoc, 1 / destW, 1 / destH)
+        gl.uniform2f(this.bloomUsOffsetLoc, radius / srcW, radius / srcH)
+
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+      }
+
+      gl.disable(gl.BLEND)
+
+      // ── Composite pass ─────────────────────────────────────────────
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+      gl.viewport(0, 0, w, h)
+
+      gl.useProgram(this.bloomCompositeProgram)
+
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.bloomSceneTexture!)
+      gl.uniform1i(this.bloomCompSceneTexLoc, 0)
+
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.bloomMips[0]!)
+      gl.uniform1i(this.bloomCompBloomTexLoc, 1)
+
+      gl.uniform1f(this.bloomCompIntensityLoc, scene.bloomIntensity ?? 1)
+      gl.uniform1f(this.bloomCompThresholdLoc, scene.bloomThreshold ?? 0)
+
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+      // ── Restore state ──────────────────────────────────────────────
+      gl.enable(gl.DEPTH_TEST)
+      gl.enable(gl.CULL_FACE)
+      gl.bindVertexArray(null)
+    } else {
+      // ── Non-bloom path (render directly to canvas) ──────────────────
+      gl.clearColor(0.15, 0.15, 0.2, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+
+      this.drawCalls = this.drawScene(false, scene, planes, skinnedSlotMap)
+
+      gl.bindVertexArray(null)
+    }
+  }
+
+  private drawScene(
+    useMRT: boolean,
+    scene: RenderScene,
+    planes: Float32Array,
+    skinnedSlotMap: Map<number, number>,
+  ): number {
+    const gl = this.gl
     let draws = 0
 
     // ── Bind shared UBOs ─────────────────────────────────────────────
@@ -625,7 +926,8 @@ export class WebGLRenderer implements IRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
 
     // ── Unlit draw pass ──────────────────────────────────────────────
-    gl.useProgram(this.unlitProgram)
+    const unlitProg = useMRT ? this.mrtUnlitProgram : this.unlitProgram
+    gl.useProgram(unlitProg)
     gl.disable(gl.CULL_FACE)
 
     for (let i = 0; i < scene.entityCount; i++) {
@@ -652,8 +954,10 @@ export class WebGLRenderer implements IRenderer {
     gl.enable(gl.CULL_FACE)
 
     // ── Opaque static draw pass ─────────────────────────────────────
-    gl.useProgram(this.staticProgram)
-    if (this.shadowMapLoc !== null) gl.uniform1i(this.shadowMapLoc, 0)
+    const staticProg = useMRT ? this.mrtStaticProgram : this.staticProgram
+    const staticShadowLoc = useMRT ? this.mrtStaticShadowMapLoc : this.shadowMapLoc
+    gl.useProgram(staticProg)
+    if (staticShadowLoc !== null) gl.uniform1i(staticShadowLoc, 0)
 
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
@@ -680,9 +984,12 @@ export class WebGLRenderer implements IRenderer {
     }
 
     // ── Opaque textured draw pass ─────────────────────────────────────
-    gl.useProgram(this.texturedProgram)
-    if (this.texturedShadowMapLoc !== null) gl.uniform1i(this.texturedShadowMapLoc, 0)
-    if (this.texturedAoMapLoc !== null) gl.uniform1i(this.texturedAoMapLoc, 1)
+    const texturedProg = useMRT ? this.mrtTexturedProgram : this.texturedProgram
+    const texturedShadowLoc = useMRT ? this.mrtTexturedShadowMapLoc : this.texturedShadowMapLoc
+    const texturedAoLoc = useMRT ? this.mrtTexturedAoMapLoc : this.texturedAoMapLoc
+    gl.useProgram(texturedProg)
+    if (texturedShadowLoc !== null) gl.uniform1i(texturedShadowLoc, 0)
+    if (texturedAoLoc !== null) gl.uniform1i(texturedAoLoc, 1)
 
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
@@ -716,8 +1023,10 @@ export class WebGLRenderer implements IRenderer {
 
     // ── Opaque skinned draw pass ──────────────────────────────────────
     if (skinnedSlotMap.size > 0) {
-      gl.useProgram(this.skinnedProgram)
-      if (this.shadowMapSkinnedLoc !== null) gl.uniform1i(this.shadowMapSkinnedLoc, 0)
+      const skinnedProg = useMRT ? this.mrtSkinnedProgram : this.skinnedProgram
+      const skinnedShadowLoc = useMRT ? this.mrtSkinnedShadowMapLoc : this.shadowMapSkinnedLoc
+      gl.useProgram(skinnedProg)
+      if (skinnedShadowLoc !== null) gl.uniform1i(skinnedShadowLoc, 0)
 
       for (let i = 0; i < scene.entityCount; i++) {
         if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
@@ -796,8 +1105,10 @@ export class WebGLRenderer implements IRenderer {
       const isTextured = !!scene.texturedMask[i]
       if (isSkinned) {
         if (curPipeType !== 1) {
-          gl.useProgram(this.skinnedProgram)
-          if (this.shadowMapSkinnedLoc !== null) gl.uniform1i(this.shadowMapSkinnedLoc, 0)
+          const prog = useMRT ? this.mrtSkinnedProgram : this.skinnedProgram
+          const loc = useMRT ? this.mrtSkinnedShadowMapLoc : this.shadowMapSkinnedLoc
+          gl.useProgram(prog)
+          if (loc !== null) gl.uniform1i(loc, 0)
           curPipeType = 1
         }
         const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)!
@@ -809,9 +1120,12 @@ export class WebGLRenderer implements IRenderer {
         gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
       } else if (isTextured) {
         if (curPipeType !== 2) {
-          gl.useProgram(this.texturedProgram)
-          if (this.texturedShadowMapLoc !== null) gl.uniform1i(this.texturedShadowMapLoc, 0)
-          if (this.texturedAoMapLoc !== null) gl.uniform1i(this.texturedAoMapLoc, 1)
+          const prog = useMRT ? this.mrtTexturedProgram : this.texturedProgram
+          const shadowLoc = useMRT ? this.mrtTexturedShadowMapLoc : this.texturedShadowMapLoc
+          const aoLoc = useMRT ? this.mrtTexturedAoMapLoc : this.texturedAoMapLoc
+          gl.useProgram(prog)
+          if (shadowLoc !== null) gl.uniform1i(shadowLoc, 0)
+          if (aoLoc !== null) gl.uniform1i(aoLoc, 1)
           curPipeType = 2
         }
         const geo = this.texturedGeometries.get(scene.geometryIds[i]!)
@@ -828,8 +1142,10 @@ export class WebGLRenderer implements IRenderer {
         gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
       } else {
         if (curPipeType !== 0) {
-          gl.useProgram(this.staticProgram)
-          if (this.shadowMapLoc !== null) gl.uniform1i(this.shadowMapLoc, 0)
+          const prog = useMRT ? this.mrtStaticProgram : this.staticProgram
+          const loc = useMRT ? this.mrtStaticShadowMapLoc : this.shadowMapLoc
+          gl.useProgram(prog)
+          if (loc !== null) gl.uniform1i(loc, 0)
           curPipeType = 0
         }
         const geo = this.geometries.get(scene.geometryIds[i]!)!
@@ -844,8 +1160,7 @@ export class WebGLRenderer implements IRenderer {
     gl.depthMask(true)
     gl.enable(gl.CULL_FACE)
 
-    this.drawCalls = draws
-    gl.bindVertexArray(null)
+    return draws
   }
 
   destroy(): void {
@@ -886,5 +1201,14 @@ export class WebGLRenderer implements IRenderer {
     gl.deleteProgram(this.unlitProgram)
     gl.deleteProgram(this.shadowDepthProgram)
     gl.deleteProgram(this.shadowSkinnedDepthProgram)
+    gl.deleteProgram(this.mrtStaticProgram)
+    gl.deleteProgram(this.mrtSkinnedProgram)
+    gl.deleteProgram(this.mrtUnlitProgram)
+    gl.deleteProgram(this.mrtTexturedProgram)
+    gl.deleteProgram(this.bloomDownsampleProgram)
+    gl.deleteProgram(this.bloomUpsampleProgram)
+    gl.deleteProgram(this.bloomCompositeProgram)
+    gl.deleteVertexArray(this.bloomFullscreenVAO)
+    this.destroyBloomTextures()
   }
 }

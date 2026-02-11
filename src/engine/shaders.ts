@@ -9,6 +9,8 @@ struct Camera {
 struct Model {
   world : mat4x4f,
   color : vec4f,
+  bloom : f32,
+  bloomWhiten : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -64,12 +66,12 @@ fn pcfShadow(coord : vec3f) -> f32 {
     shadow += textureSampleCompare(shadowMap, shadowSampler, uv + offset, refDepth);
   }
   shadow /= 9.0;
-  // Outside shadow map (XY or Z) or disabled → fully lit
+  // Outside shadow map (XY or Z) or disabled -> fully lit
   let inBounds = step(0.0, coord.x) * step(coord.x, 1.0) * step(0.0, coord.y) * step(coord.y, 1.0) * step(0.0, coord.z) * step(coord.z, 1.0);
   return mix(1.0, shadow, inBounds * step(0.5, enabled));
 }
 
-@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+fn lambertColor(input : VSOut) -> vec4f {
   let N = normalize(input.worldNorm);
   let L = normalize(-lighting.direction.xyz);
   let NdotL = max(dot(N, L), 0.0);
@@ -78,6 +80,23 @@ fn pcfShadow(coord : vec3f) -> f32 {
   let ambient  = lighting.ambientColor.rgb;
   let finalColor = model.color.rgb * input.vertColor * (diffuse + ambient);
   return vec4f(finalColor, model.color.a);
+}
+
+@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+  return lambertColor(input);
+}
+
+struct FragOutput {
+  @location(0) color    : vec4f,
+  @location(1) bloomOut : vec4f,
+};
+
+@fragment fn fsMRT(input : VSOut) -> FragOutput {
+  let c = lambertColor(input);
+  var out : FragOutput;
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  return out;
 }
 `
 
@@ -149,7 +168,7 @@ struct VSIn {
 }
 `
 
-// ── Textured Lambert shader (AO map) ──────────────────────────────────
+// -- Textured Lambert shader (AO map) --
 
 const texturedSharedStructs = /* wgsl */ `
 struct Camera {
@@ -161,6 +180,8 @@ struct Camera {
 struct Model {
   world : mat4x4f,
   color : vec4f,
+  bloom : f32,
+  bloomWhiten : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -221,7 +242,7 @@ fn pcfShadow(coord : vec3f) -> f32 {
   return mix(1.0, shadow, inBounds * step(0.5, enabled));
 }
 
-@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+fn texturedLambertColor(input : VSOut) -> vec4f {
   let N = normalize(input.worldNorm);
   let L = normalize(-lighting.direction.xyz);
   let NdotL = max(dot(N, L), 0.0);
@@ -231,6 +252,23 @@ fn pcfShadow(coord : vec3f) -> f32 {
   let ambient  = lighting.ambientColor.rgb * ao;
   let finalColor = model.color.rgb * input.vertColor * (diffuse + ambient);
   return vec4f(finalColor, model.color.a);
+}
+
+@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+  return texturedLambertColor(input);
+}
+
+struct FragOutput {
+  @location(0) color    : vec4f,
+  @location(1) bloomOut : vec4f,
+};
+
+@fragment fn fsMRT(input : VSOut) -> FragOutput {
+  let c = texturedLambertColor(input);
+  var out : FragOutput;
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  return out;
 }
 `
 
@@ -264,7 +302,7 @@ struct VSIn {
 }
 `
 
-// ── Unlit shader (no lighting, no shadows) ────────────────────────────
+// -- Unlit shader (no lighting, no shadows) --
 
 export const unlitShader = /* wgsl */ `
 struct Camera {
@@ -276,6 +314,8 @@ struct Camera {
 struct Model {
   world : mat4x4f,
   color : vec4f,
+  bloom : f32,
+  bloomWhiten : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -298,12 +338,29 @@ struct VSIn {
   return out;
 }
 
-@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+fn unlitColor(input : VSOut) -> vec4f {
   return vec4f(model.color.rgb * input.vertColor, model.color.a);
+}
+
+@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+  return unlitColor(input);
+}
+
+struct FragOutput {
+  @location(0) color    : vec4f,
+  @location(1) bloomOut : vec4f,
+};
+
+@fragment fn fsMRT(input : VSOut) -> FragOutput {
+  let c = unlitColor(input);
+  var out : FragOutput;
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  return out;
 }
 `
 
-// ── Shadow depth shaders (depth-only, no fragment stage) ──────────────
+// -- Shadow depth shaders (depth-only, no fragment stage) --
 
 export const shadowDepthShader = /* wgsl */ `
 struct Camera {
@@ -315,6 +372,8 @@ struct Camera {
 struct Model {
   world : mat4x4f,
   color : vec4f,
+  bloom : f32,
+  bloomWhiten : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -334,6 +393,8 @@ struct Camera {
 struct Model {
   world : mat4x4f,
   color : vec4f,
+  bloom : f32,
+  bloomWhiten : f32,
 };
 @group(1) @binding(0) var<uniform> model : Model;
 
@@ -352,5 +413,100 @@ struct Model {
 
   let worldPos = model.world * skinMat * vec4f(position, 1.0);
   return camera.projection * camera.view * worldPos;
+}
+`
+
+// -- Bloom post-processing shaders --
+
+export const bloomDownsampleShader = /* wgsl */ `
+struct Params {
+  srcTexelSize : vec2f,
+};
+@group(0) @binding(0) var src : texture_2d<f32>;
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var<uniform> params : Params;
+
+@vertex fn vs(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4f {
+  let x = f32((vi << 1u) & 2u);
+  let y = f32(vi & 2u);
+  return vec4f(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) pos : vec4f) -> @location(0) vec4f {
+  // pos.xy is in dest pixels; dest = src / 2, so uv = pos.xy * srcTexelSize * 2
+  let uv = pos.xy * params.srcTexelSize * 2.0;
+  let t = params.srcTexelSize;
+  // 4-tap bilinear downsample (each tap averages a 2x2 block via linear filtering)
+  let a = textureSample(src, samp, uv + vec2(-t.x, -t.y) * 0.5);
+  let b = textureSample(src, samp, uv + vec2( t.x, -t.y) * 0.5);
+  let c = textureSample(src, samp, uv + vec2(-t.x,  t.y) * 0.5);
+  let d = textureSample(src, samp, uv + vec2( t.x,  t.y) * 0.5);
+  return (a + b + c + d) * 0.25;
+}
+`
+
+export const bloomUpsampleShader = /* wgsl */ `
+struct Params {
+  destTexelSize : vec2f,
+  offset        : vec2f, // precomputed: filterRadius * srcTexelSize
+};
+@group(0) @binding(0) var src : texture_2d<f32>;
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var<uniform> params : Params;
+
+@vertex fn vs(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4f {
+  let x = f32((vi << 1u) & 2u);
+  let y = f32(vi & 2u);
+  return vec4f(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) pos : vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * params.destTexelSize;
+  let o = params.offset;
+  // 9-tap tent filter
+  var color = textureSample(src, samp, uv) * 4.0;
+  color += textureSample(src, samp, uv + vec2(-o.x, 0.0)) * 2.0;
+  color += textureSample(src, samp, uv + vec2( o.x, 0.0)) * 2.0;
+  color += textureSample(src, samp, uv + vec2(0.0, -o.y)) * 2.0;
+  color += textureSample(src, samp, uv + vec2(0.0,  o.y)) * 2.0;
+  color += textureSample(src, samp, uv + vec2(-o.x, -o.y));
+  color += textureSample(src, samp, uv + vec2( o.x, -o.y));
+  color += textureSample(src, samp, uv + vec2(-o.x,  o.y));
+  color += textureSample(src, samp, uv + vec2( o.x,  o.y));
+  return color / 16.0;
+}
+`
+
+export const bloomCompositeShader = /* wgsl */ `
+struct CompositeParams {
+  intensity : f32,
+  threshold : f32,
+  _pad0     : f32,
+  _pad1     : f32,
+};
+@group(0) @binding(0) var sceneTex : texture_2d<f32>;
+@group(0) @binding(1) var bloomTex : texture_2d<f32>;
+@group(0) @binding(2) var texSampler : sampler;
+@group(0) @binding(3) var<uniform> params : CompositeParams;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0)       uv  : vec2f,
+};
+
+@vertex fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  var out : VSOut;
+  let x = f32((vi << 1u) & 2u);
+  let y = f32(vi & 2u);
+  out.pos = vec4f(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+  out.uv = vec2f(x, 1.0 - y);
+  return out;
+}
+
+@fragment fn fs(input : VSOut) -> @location(0) vec4f {
+  let scene = textureSample(sceneTex, texSampler, input.uv);
+  let bloom = textureSample(bloomTex, texSampler, input.uv);
+  let bloomContrib = max(bloom.rgb - vec3f(params.threshold), vec3f(0.0));
+  return vec4f(scene.rgb + bloomContrib * params.intensity, scene.a);
 }
 `

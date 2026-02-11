@@ -1,5 +1,7 @@
 export { createScene, Scene, Mesh, Camera } from './scene.ts'
-export type { MeshOptions, ShadowConfig } from './scene.ts'
+export type { MeshOptions, ShadowConfig, BloomConfig } from './scene.ts'
+export { HtmlOverlay, HtmlElement } from './html-overlay.ts'
+export type { HtmlElementOptions } from './html-overlay.ts'
 export { createRenderer } from './gpu.ts'
 export { Renderer } from './renderer.ts'
 export { WebGLRenderer } from './webgl-renderer.ts'
@@ -19,18 +21,30 @@ export {
   unlitShader,
   shadowDepthShader,
   skinnedShadowDepthShader,
+  bloomDownsampleShader,
+  bloomUpsampleShader,
+  bloomCompositeShader,
 } from './shaders.ts'
 export {
   glLambertVS,
   glLambertFS,
+  glLambertMRTFS,
   glUnlitVS,
   glUnlitFS,
+  glUnlitMRTFS,
   glSkinnedLambertVS,
   glTexturedLambertVS,
   glTexturedLambertFS,
+  glTexturedLambertMRTFS,
   glShadowDepthVS,
   glSkinnedShadowDepthVS,
   glShadowDepthFS,
+  glBloomDownsampleVS,
+  glBloomDownsampleFS,
+  glBloomUpsampleVS,
+  glBloomUpsampleFS,
+  glBloomCompositeVS,
+  glBloomCompositeFS,
 } from './webgl-shaders.ts'
 export {
   v3Set,

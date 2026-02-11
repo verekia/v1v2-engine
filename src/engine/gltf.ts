@@ -14,6 +14,7 @@ export interface GltfMesh {
   skinJoints?: Uint8Array
   skinWeights?: Float32Array
   skinIndex?: number
+  materialIndices?: Uint8Array
 }
 
 export interface GltfSkin {
@@ -277,6 +278,10 @@ export async function loadGlb(
           entry.uvs = result.uvs
         }
 
+        if (result.materialIndices) {
+          entry.materialIndices = result.materialIndices
+        }
+
         if (hasSkin && result.skinJoints && result.skinWeights) {
           entry.skinJoints = result.skinJoints
           entry.skinWeights = result.skinWeights
@@ -310,6 +315,7 @@ interface PrimitiveResult {
   uvs?: Float32Array
   skinJoints?: Uint8Array
   skinWeights?: Float32Array
+  materialIndices?: Uint8Array
 }
 
 function decodePrimitive(
@@ -474,6 +480,15 @@ function decodeDracoPrimitive(
     indices[i * 3 + 2] = face.GetValue(2)
   }
 
+  // Extract per-vertex material indices if available
+  let materialIndices: Uint8Array | undefined
+  if (matIdxArray) {
+    materialIndices = new Uint8Array(numVertices)
+    for (let i = 0; i < numVertices; i++) {
+      materialIndices[i] = Math.round(matIdxArray.GetValue(i))
+    }
+  }
+
   // Cleanup
   draco.destroy(face)
   draco.destroy(posArray)
@@ -483,7 +498,7 @@ function decodeDracoPrimitive(
   draco.destroy(buffer)
   draco.destroy(decoder)
 
-  return { vertices, indices, uvs, skinJoints, skinWeights }
+  return { vertices, indices, uvs, skinJoints, skinWeights, materialIndices }
 }
 
 function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): PrimitiveResult | null {

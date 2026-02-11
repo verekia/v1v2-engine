@@ -6,6 +6,9 @@ import {
   unlitShader,
   shadowDepthShader,
   skinnedShadowDepthShader,
+  bloomDownsampleShader,
+  bloomUpsampleShader,
+  bloomCompositeShader,
 } from './shaders.ts'
 
 import type { SkinInstance } from './skin.ts'
@@ -77,6 +80,12 @@ export interface RenderScene {
   shadowMapSize?: number
   shadowBias?: number
   shadowNormalBias?: number
+  bloomEnabled?: boolean
+  bloomIntensity?: number
+  bloomThreshold?: number
+  bloomRadius?: number
+  bloomWhiten?: number
+  bloomValues?: Float32Array
 }
 
 interface GeometryGPU {
@@ -137,6 +146,40 @@ export class Renderer implements IRenderer {
   private modelBGL: GPUBindGroupLayout
   private modelBG: GPUBindGroup
   private jointBG: GPUBindGroup
+
+  // MRT pipelines (bloom — 2 color targets, fsMRT entry point)
+  private mrtPipeline: GPURenderPipeline
+  private mrtSkinnedPipeline: GPURenderPipeline
+  private mrtUnlitPipeline: GPURenderPipeline
+  private mrtTexturedPipeline: GPURenderPipeline
+  private mrtTransparentPipeline: GPURenderPipeline
+  private mrtTransparentSkinnedPipeline: GPURenderPipeline
+  private mrtTransparentTexturedPipeline: GPURenderPipeline
+
+  // Bloom post-processing (downsample-upsample mip chain)
+  private static readonly BLOOM_MIPS = 5
+  private bloomDownsamplePipeline: GPURenderPipeline
+  private bloomUpsamplePipeline: GPURenderPipeline
+  private bloomCompositePipeline: GPURenderPipeline
+  private bloomSampleBGL: GPUBindGroupLayout // shared by downsample + upsample
+  private bloomCompositeBGL: GPUBindGroupLayout
+  private bloomDownsampleParams: GPUBuffer[] = [] // one per downsample pass
+  private bloomUpsampleParams: GPUBuffer[] = [] // one per upsample pass
+  private bloomCompositeParamsBuffer: GPUBuffer
+  private bloomLinearSampler: GPUSampler
+  private bloomSceneTexture: GPUTexture | null = null
+  private bloomSceneView: GPUTextureView | null = null
+  private bloomMsaaTexture: GPUTexture | null = null
+  private bloomMsaaView: GPUTextureView | null = null
+  private bloomTexture: GPUTexture | null = null
+  private bloomTextureView: GPUTextureView | null = null
+  private bloomMips: GPUTexture[] = []
+  private bloomMipViews: GPUTextureView[] = []
+  private bloomDownsampleBGs: GPUBindGroup[] = []
+  private bloomUpsampleBGs: GPUBindGroup[] = []
+  private bloomCompositeBGInst: GPUBindGroup | null = null
+  private bloomTexW = 0
+  private bloomTexH = 0
 
   private geometries = new Map<number, GeometryGPU>()
   private skinnedGeometries = new Map<number, SkinnedGeometryGPU>()
@@ -468,6 +511,155 @@ export class Renderer implements IRenderer {
       multisample: { count: MSAA_SAMPLES },
     })
 
+    // ── MRT pipelines (bloom — 2 color targets, fsMRT entry point) ────
+    const mrtTargets: GPUColorTargetState[] = [{ format }, { format }]
+    const mrtAlphaTargets: GPUColorTargetState[] = [
+      { format, blend: alphaBlend },
+      { format, blend: alphaBlend },
+    ]
+
+    this.mrtUnlitPipeline = device.createRenderPipeline({
+      layout: unlitPipelineLayout,
+      vertex: {
+        module: unlitShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+        ],
+      },
+      fragment: { module: unlitShaderModule, entryPoint: 'fsMRT', targets: mrtTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+        ],
+      },
+      fragment: { module: shaderModule, entryPoint: 'fsMRT', targets: mrtTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtSkinnedPipeline = device.createRenderPipeline({
+      layout: skinnedPipelineLayout,
+      vertex: {
+        module: skinnedShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      fragment: { module: skinnedShaderModule, entryPoint: 'fsMRT', targets: mrtTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtTexturedPipeline = device.createRenderPipeline({
+      layout: texturedPipelineLayout,
+      vertex: { module: texturedShaderModule, entryPoint: 'vs', buffers: texturedVertexBuffers },
+      fragment: { module: texturedShaderModule, entryPoint: 'fsMRT', targets: mrtTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtTransparentPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+        ],
+      },
+      fragment: { module: shaderModule, entryPoint: 'fsMRT', targets: mrtAlphaTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtTransparentSkinnedPipeline = device.createRenderPipeline({
+      layout: skinnedPipelineLayout,
+      vertex: {
+        module: skinnedShaderModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: 36,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+              { shaderLocation: 2, offset: 24, format: 'float32x3' },
+            ],
+          },
+          {
+            arrayStride: 20,
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      fragment: { module: skinnedShaderModule, entryPoint: 'fsMRT', targets: mrtAlphaTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
+    this.mrtTransparentTexturedPipeline = device.createRenderPipeline({
+      layout: texturedPipelineLayout,
+      vertex: { module: texturedShaderModule, entryPoint: 'vs', buffers: texturedVertexBuffers },
+      fragment: { module: texturedShaderModule, entryPoint: 'fsMRT', targets: mrtAlphaTargets },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: MSAA_SAMPLES },
+    })
+
     // ── Shadow pipelines ──────────────────────────────────────────────
     const shadowDepthStencil: GPUDepthStencilState = {
       format: 'depth32float',
@@ -590,6 +782,85 @@ export class Renderer implements IRenderer {
       layout: cameraBGL,
       entries: [{ binding: 0, resource: { buffer: this.shadowCameraBuffer } }],
     })
+
+    // ── Bloom post-processing pipelines (downsample-upsample mip chain) ──
+    const bloomDownsampleModule = device.createShaderModule({ code: bloomDownsampleShader })
+    const bloomUpsampleModule = device.createShaderModule({ code: bloomUpsampleShader })
+    const bloomCompositeModule = device.createShaderModule({ code: bloomCompositeShader })
+
+    this.bloomSampleBGL = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    })
+    this.bloomCompositeBGL = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    })
+
+    const bloomSampleLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bloomSampleBGL] })
+    this.bloomDownsamplePipeline = device.createRenderPipeline({
+      layout: bloomSampleLayout,
+      vertex: { module: bloomDownsampleModule, entryPoint: 'vs' },
+      fragment: { module: bloomDownsampleModule, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.bloomUpsamplePipeline = device.createRenderPipeline({
+      layout: bloomSampleLayout,
+      vertex: { module: bloomUpsampleModule, entryPoint: 'vs' },
+      fragment: {
+        module: bloomUpsampleModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one' },
+              alpha: { srcFactor: 'one', dstFactor: 'one' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.bloomCompositePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.bloomCompositeBGL] }),
+      vertex: { module: bloomCompositeModule, entryPoint: 'vs' },
+      fragment: { module: bloomCompositeModule, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    })
+
+    const MIPS = Renderer.BLOOM_MIPS
+    for (let i = 0; i < MIPS; i++) {
+      this.bloomDownsampleParams.push(
+        device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+      )
+    }
+    for (let i = 0; i < MIPS - 1; i++) {
+      this.bloomUpsampleParams.push(
+        device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+      )
+    }
+    this.bloomCompositeParamsBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.bloomLinearSampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
   }
 
   private createMsaaTexture(w: number, h: number): GPUTexture {
@@ -608,6 +879,126 @@ export class Renderer implements IRenderer {
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
       sampleCount: MSAA_SAMPLES,
     })
+  }
+
+  private ensureBloomTextures(w: number, h: number): void {
+    if (this.bloomTexW === w && this.bloomTexH === h && this.bloomSceneTexture) return
+    this.destroyBloomTextures()
+
+    const device = this.device
+    const MIPS = Renderer.BLOOM_MIPS
+
+    // Scene resolve target (full res)
+    this.bloomSceneTexture = device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    this.bloomSceneView = this.bloomSceneTexture.createView()
+
+    // Bloom MRT MSAA + resolve (full res)
+    this.bloomMsaaTexture = device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      sampleCount: MSAA_SAMPLES,
+    })
+    this.bloomMsaaView = this.bloomMsaaTexture.createView()
+
+    this.bloomTexture = device.createTexture({
+      size: [w, h],
+      format: this.canvasFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    this.bloomTextureView = this.bloomTexture.createView()
+
+    // Mip chain: 5 levels at 1/2, 1/4, 1/8, 1/16, 1/32
+    let mw = w,
+      mh = h
+    for (let i = 0; i < MIPS; i++) {
+      mw = Math.max(1, (mw / 2) | 0)
+      mh = Math.max(1, (mh / 2) | 0)
+      const tex = device.createTexture({
+        size: [mw, mh],
+        format: this.canvasFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      })
+      this.bloomMips.push(tex)
+      this.bloomMipViews.push(tex.createView())
+    }
+
+    // Downsample bind groups: pass i reads from source (bloomTexture or mip[i-1])
+    // and writes downsample params with source texel size
+    let sw = w,
+      sh = h
+    for (let i = 0; i < MIPS; i++) {
+      const srcView = i === 0 ? this.bloomTextureView : this.bloomMipViews[i - 1]!
+      const srcTexelData = new Float32Array([1 / sw, 1 / sh, 0, 0])
+      device.queue.writeBuffer(this.bloomDownsampleParams[i]!, 0, srcTexelData.buffer as ArrayBuffer, 0, 16)
+      this.bloomDownsampleBGs.push(
+        device.createBindGroup({
+          layout: this.bloomSampleBGL,
+          entries: [
+            { binding: 0, resource: srcView },
+            { binding: 1, resource: this.bloomLinearSampler },
+            { binding: 2, resource: { buffer: this.bloomDownsampleParams[i]! } },
+          ],
+        }),
+      )
+      sw = Math.max(1, (sw / 2) | 0)
+      sh = Math.max(1, (sh / 2) | 0)
+    }
+
+    // Upsample bind groups: pass i reads from mip[MIPS-1-i] (lower mip)
+    // and renders additively into mip[MIPS-2-i] (higher mip)
+    // Upsample params (destTexelSize + offset) written per-frame in render() for dynamic radius
+    for (let i = 0; i < MIPS - 1; i++) {
+      const srcIdx = MIPS - 1 - i // read from lowest first
+      this.bloomUpsampleBGs.push(
+        device.createBindGroup({
+          layout: this.bloomSampleBGL,
+          entries: [
+            { binding: 0, resource: this.bloomMipViews[srcIdx]! },
+            { binding: 1, resource: this.bloomLinearSampler },
+            { binding: 2, resource: { buffer: this.bloomUpsampleParams[i]! } },
+          ],
+        }),
+      )
+    }
+
+    // Composite: reads scene + mip[0] (accumulated bloom)
+    this.bloomCompositeBGInst = device.createBindGroup({
+      layout: this.bloomCompositeBGL,
+      entries: [
+        { binding: 0, resource: this.bloomSceneView },
+        { binding: 1, resource: this.bloomMipViews[0]! },
+        { binding: 2, resource: this.bloomLinearSampler },
+        { binding: 3, resource: { buffer: this.bloomCompositeParamsBuffer } },
+      ],
+    })
+
+    this.bloomTexW = w
+    this.bloomTexH = h
+  }
+
+  private destroyBloomTextures(): void {
+    this.bloomSceneTexture?.destroy()
+    this.bloomMsaaTexture?.destroy()
+    this.bloomTexture?.destroy()
+    for (const tex of this.bloomMips) tex.destroy()
+    this.bloomSceneTexture = null
+    this.bloomSceneView = null
+    this.bloomMsaaTexture = null
+    this.bloomMsaaView = null
+    this.bloomTexture = null
+    this.bloomTextureView = null
+    this.bloomMips = []
+    this.bloomMipViews = []
+    this.bloomDownsampleBGs = []
+    this.bloomUpsampleBGs = []
+    this.bloomCompositeBGInst = null
+    this.bloomTexW = 0
+    this.bloomTexH = 0
   }
 
   perspective(out: Float32Array, o: number, fovY: number, aspect: number, near: number, far: number): void {
@@ -634,6 +1025,7 @@ export class Renderer implements IRenderer {
     this.depthTexture.destroy()
     this.depthTexture = this.createDepthTexture(w, h)
     this.depthView = this.depthTexture.createView()
+    this.destroyBloomTextures()
   }
 
   registerGeometry(id: number, vertices: Float32Array, indices: Uint16Array | Uint32Array): void {
@@ -901,7 +1293,10 @@ export class Renderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
-      device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 20)
+      const bloomVal = scene.bloomValues?.[i] ?? 0
+      modelSlot[20] = bloomVal
+      modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+      device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
     }
 
     // Upload joint matrices for skinned entities
@@ -995,28 +1390,146 @@ export class Renderer implements IRenderer {
     }
 
     // ── Main render pass ───────────────────────────────────────────────
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.msaaView,
-          resolveTarget: this.context.getCurrentTexture().createView(),
-          clearValue: { r: 0.15, g: 0.15, b: 0.2, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-      depthStencilAttachment: {
-        view: this.depthView,
-        depthClearValue: 1.0,
-        depthLoadOp: 'clear',
-        depthStoreOp: 'store',
-      },
-    })
+    const useBloom = !!scene.bloomEnabled
+    const canvasTex = this.context.getCurrentTexture()
 
+    if (useBloom) {
+      this.ensureBloomTextures(canvasTex.width, canvasTex.height)
+
+      // MRT pass: 2 color attachments → sceneTexture + bloomTexture
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: this.msaaView,
+            resolveTarget: this.bloomSceneView!,
+            clearValue: { r: 0.15, g: 0.15, b: 0.2, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+          {
+            view: this.bloomMsaaView!,
+            resolveTarget: this.bloomTextureView!,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+        depthStencilAttachment: {
+          view: this.depthView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store',
+        },
+      })
+      this.drawCalls = this.drawScene(pass, scene, planes, skinnedSlotMap, true)
+      pass.end()
+
+      // Downsample chain: bloomTexture → mip[0] → mip[1] → ... → mip[N-1]
+      const MIPS = Renderer.BLOOM_MIPS
+      for (let i = 0; i < MIPS; i++) {
+        const p = encoder.beginRenderPass({
+          colorAttachments: [
+            { view: this.bloomMipViews[i]!, loadOp: 'clear', clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: 'store' },
+          ],
+        })
+        p.setPipeline(this.bloomDownsamplePipeline)
+        p.setBindGroup(0, this.bloomDownsampleBGs[i]!)
+        p.draw(3)
+        p.end()
+      }
+
+      // Write upsample params per-frame (destTexelSize + offset based on dynamic radius)
+      const radius = scene.bloomRadius ?? 1
+      let uw = canvasTex.width,
+        uh = canvasTex.height
+      // Compute mip sizes
+      const mipW: number[] = [],
+        mipH: number[] = []
+      for (let i = 0; i < MIPS; i++) {
+        uw = Math.max(1, (uw / 2) | 0)
+        uh = Math.max(1, (uh / 2) | 0)
+        mipW.push(uw)
+        mipH.push(uh)
+      }
+      for (let i = 0; i < MIPS - 1; i++) {
+        const srcIdx = MIPS - 1 - i // source mip (lower res)
+        const dstIdx = MIPS - 2 - i // dest mip (higher res)
+        const destW = mipW[dstIdx]!,
+          destH = mipH[dstIdx]!
+        const srcW = mipW[srcIdx]!,
+          srcH = mipH[srcIdx]!
+        const data = new Float32Array([1 / destW, 1 / destH, radius / srcW, radius / srcH])
+        device.queue.writeBuffer(this.bloomUpsampleParams[i]!, 0, data.buffer as ArrayBuffer, 0, 16)
+      }
+
+      // Upsample chain: mip[N-1] → mip[N-2] → ... → mip[0] (additive blend)
+      for (let i = 0; i < MIPS - 1; i++) {
+        const dstIdx = MIPS - 2 - i
+        const p = encoder.beginRenderPass({
+          colorAttachments: [{ view: this.bloomMipViews[dstIdx]!, loadOp: 'load', storeOp: 'store' }],
+        })
+        p.setPipeline(this.bloomUpsamplePipeline)
+        p.setBindGroup(0, this.bloomUpsampleBGs[i]!)
+        p.draw(3)
+        p.end()
+      }
+
+      // Composite: sceneTexture + mip[0] (accumulated bloom) → canvas
+      const compositeParams = new Float32Array(4)
+      compositeParams[0] = scene.bloomIntensity ?? 1
+      compositeParams[1] = scene.bloomThreshold ?? 0
+      device.queue.writeBuffer(this.bloomCompositeParamsBuffer, 0, compositeParams.buffer as ArrayBuffer, 0, 16)
+      const compositePass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: canvasTex.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      })
+      compositePass.setPipeline(this.bloomCompositePipeline)
+      compositePass.setBindGroup(0, this.bloomCompositeBGInst!)
+      compositePass.draw(3)
+      compositePass.end()
+    } else {
+      // Original single-target path
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: this.msaaView,
+            resolveTarget: canvasTex.createView(),
+            clearValue: { r: 0.15, g: 0.15, b: 0.2, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+        depthStencilAttachment: {
+          view: this.depthView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store',
+        },
+      })
+      this.drawCalls = this.drawScene(pass, scene, planes, skinnedSlotMap, false)
+      pass.end()
+    }
+
+    device.queue.submit([encoder.finish()])
+  }
+
+  private drawScene(
+    pass: GPURenderPassEncoder,
+    scene: RenderScene,
+    planes: Float32Array,
+    skinnedSlotMap: Map<number, number>,
+    useMRT: boolean,
+  ): number {
     let draws = 0
 
     // ── Unlit draw pass ───────────────────────────────────────────────
-    pass.setPipeline(this.unlitPipeline)
+    pass.setPipeline(useMRT ? this.mrtUnlitPipeline : this.unlitPipeline)
     pass.setBindGroup(0, this.cameraBG)
 
     for (let i = 0; i < scene.entityCount; i++) {
@@ -1042,7 +1555,7 @@ export class Renderer implements IRenderer {
     }
 
     // ── Opaque static draw pass ───────────────────────────────────────
-    pass.setPipeline(this.pipeline)
+    pass.setPipeline(useMRT ? this.mrtPipeline : this.pipeline)
     pass.setBindGroup(0, this.cameraBG)
     pass.setBindGroup(2, this.lightingBG)
 
@@ -1072,7 +1585,7 @@ export class Renderer implements IRenderer {
     }
 
     // ── Opaque textured draw pass ─────────────────────────────────────
-    pass.setPipeline(this.texturedPipeline)
+    pass.setPipeline(useMRT ? this.mrtTexturedPipeline : this.texturedPipeline)
     pass.setBindGroup(0, this.cameraBG)
     pass.setBindGroup(2, this.lightingBG)
 
@@ -1106,7 +1619,7 @@ export class Renderer implements IRenderer {
 
     // ── Opaque skinned draw pass ──────────────────────────────────────
     if (skinnedSlotMap.size > 0) {
-      pass.setPipeline(this.skinnedPipeline)
+      pass.setPipeline(useMRT ? this.mrtSkinnedPipeline : this.skinnedPipeline)
       pass.setBindGroup(0, this.cameraBG)
       pass.setBindGroup(2, this.lightingBG)
 
@@ -1184,7 +1697,7 @@ export class Renderer implements IRenderer {
       const isTextured = !!scene.texturedMask[i]
       if (isSkinned) {
         if (curPipeType !== 1) {
-          pass.setPipeline(this.transparentSkinnedPipeline)
+          pass.setPipeline(useMRT ? this.mrtTransparentSkinnedPipeline : this.transparentSkinnedPipeline)
           pass.setBindGroup(0, this.cameraBG)
           pass.setBindGroup(2, this.lightingBG)
           curPipeType = 1
@@ -1200,7 +1713,7 @@ export class Renderer implements IRenderer {
         pass.drawIndexed(geo.indexCount)
       } else if (isTextured) {
         if (curPipeType !== 2) {
-          pass.setPipeline(this.transparentTexturedPipeline)
+          pass.setPipeline(useMRT ? this.mrtTransparentTexturedPipeline : this.transparentTexturedPipeline)
           pass.setBindGroup(0, this.cameraBG)
           pass.setBindGroup(2, this.lightingBG)
           curPipeType = 2
@@ -1218,7 +1731,7 @@ export class Renderer implements IRenderer {
         pass.drawIndexed(geo.indexCount)
       } else {
         if (curPipeType !== 0) {
-          pass.setPipeline(this.transparentPipeline)
+          pass.setPipeline(useMRT ? this.mrtTransparentPipeline : this.transparentPipeline)
           pass.setBindGroup(0, this.cameraBG)
           pass.setBindGroup(2, this.lightingBG)
           curPipeType = 0
@@ -1232,10 +1745,7 @@ export class Renderer implements IRenderer {
       draws++
     }
 
-    this.drawCalls = draws
-
-    pass.end()
-    device.queue.submit([encoder.finish()])
+    return draws
   }
 
   destroy(): void {
@@ -1267,6 +1777,10 @@ export class Renderer implements IRenderer {
     this.shadowMapTexture.destroy()
     this.msaaTexture.destroy()
     this.depthTexture.destroy()
+    this.destroyBloomTextures()
+    for (const buf of this.bloomDownsampleParams) buf.destroy()
+    for (const buf of this.bloomUpsampleParams) buf.destroy()
+    this.bloomCompositeParamsBuffer.destroy()
     this.device.destroy()
   }
 }

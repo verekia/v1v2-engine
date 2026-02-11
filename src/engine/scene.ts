@@ -16,6 +16,22 @@ export class Camera {
   readonly up = new Float32Array([0, 0, 1])
 }
 
+// ── Bloom config ────────────────────────────────────────────────────────────
+
+export interface BloomConfig {
+  enabled: boolean
+  intensity: number
+  threshold: number
+  /** Spread multiplier for blur kernel — higher = wider glow, same cost. Default 1 */
+  radius: number
+  /** How much bloom-emitting meshes are pushed toward white (0 = no change, 1 = fully white). Default 0 */
+  whiten: number
+}
+
+function createDefaultBloom(): BloomConfig {
+  return { enabled: false, intensity: 1, threshold: 0, radius: 1, whiten: 0 }
+}
+
 // ── Shadow config ───────────────────────────────────────────────────────────
 
 export interface ShadowConfig {
@@ -56,6 +72,7 @@ export interface MeshOptions {
   skinned?: boolean
   skinInstanceId?: number
   aoMap?: number
+  bloom?: number
 }
 
 export class Mesh {
@@ -70,6 +87,7 @@ export class Mesh {
   skinned: boolean
   skinInstanceId: number
   aoMap: number
+  bloom: number
   boneParent: Mesh | null = null
   boneSkinInstance: SkinInstance | null = null
   boneNodeIndex = -1
@@ -85,6 +103,7 @@ export class Mesh {
     this.skinned = opts.skinned ?? false
     this.skinInstanceId = opts.skinInstanceId ?? -1
     this.aoMap = opts.aoMap ?? -1
+    this.bloom = opts.bloom ?? 0
   }
 }
 
@@ -119,6 +138,7 @@ interface TexReg {
 export class Scene {
   readonly camera = new Camera()
   readonly shadow: ShadowConfig = createDefaultShadow()
+  readonly bloom: BloomConfig = createDefaultBloom()
   readonly lightDirection = new Float32Array(3)
   readonly lightDirColor = new Float32Array(3)
   readonly lightAmbientColor = new Float32Array(3)
@@ -146,6 +166,7 @@ export class Scene {
   private _unlitMask: Uint8Array
   private _texturedMask: Uint8Array
   private _aoMapIds: Int16Array
+  private _bloomValues: Float32Array
 
   // View/projection matrices (written during render)
   private _viewMatrix = new Float32Array(16)
@@ -178,6 +199,7 @@ export class Scene {
     this._unlitMask = new Uint8Array(maxEntities)
     this._texturedMask = new Uint8Array(maxEntities)
     this._aoMapIds = new Int16Array(maxEntities).fill(-1)
+    this._bloomValues = new Float32Array(maxEntities)
   }
 
   get backendType(): BackendType {
@@ -190,6 +212,18 @@ export class Scene {
 
   get meshes(): readonly Mesh[] {
     return this._meshes
+  }
+
+  get viewMatrix(): Float32Array {
+    return this._viewMatrix
+  }
+
+  get projMatrix(): Float32Array {
+    return this._projMatrix
+  }
+
+  get canvas(): HTMLCanvasElement {
+    return this._canvas
   }
 
   // ── Geometry management ─────────────────────────────────────────────────
@@ -339,6 +373,7 @@ export class Scene {
       this._unlitMask[i] = m.unlit ? 1 : 0
       this._texturedMask[i] = m.aoMap >= 0 ? 1 : 0
       this._aoMapIds[i] = m.aoMap
+      this._bloomValues[i] = m.bloom
     }
 
     // Bone attachment pass: override world matrices for bone-attached meshes
@@ -381,6 +416,12 @@ export class Scene {
       skinInstances: this.skinInstances,
       texturedMask: this._texturedMask,
       aoMapIds: this._aoMapIds,
+      bloomEnabled: this.bloom.enabled,
+      bloomIntensity: this.bloom.intensity,
+      bloomThreshold: this.bloom.threshold,
+      bloomRadius: this.bloom.radius,
+      bloomWhiten: this.bloom.whiten,
+      bloomValues: this._bloomValues,
     }
 
     // Compute shadow VP if enabled

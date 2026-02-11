@@ -11,9 +11,42 @@ import {
   createBoxGeometry,
   createSphereGeometry,
   mergeGeometries,
+  HtmlOverlay,
+  HtmlElement,
 } from './engine/index.ts'
 
 import type { BackendType } from './engine/index.ts'
+
+function splitByMaterial(
+  vertices: Float32Array,
+  indices: Uint16Array | Uint32Array,
+  materialIndices: Uint8Array,
+  matchFn: (matIdx: number) => boolean,
+): { vertices: Float32Array; indices: Uint16Array | Uint32Array } | null {
+  const vertexMap = new Map<number, number>()
+  const newVerts: number[] = []
+  const newIdx: number[] = []
+
+  for (let f = 0; f < indices.length; f += 3) {
+    const i0 = indices[f]!
+    if (!matchFn(materialIndices[i0]!)) continue
+    for (let k = 0; k < 3; k++) {
+      const oldIdx = indices[f + k]!
+      if (!vertexMap.has(oldIdx)) {
+        const newI = vertexMap.size
+        vertexMap.set(oldIdx, newI)
+        for (let j = 0; j < 9; j++) newVerts.push(vertices[oldIdx * 9 + j]!)
+      }
+      newIdx.push(vertexMap.get(oldIdx)!)
+    }
+  }
+
+  if (newIdx.length === 0) return null
+  return {
+    vertices: new Float32Array(newVerts),
+    indices: newIdx.length <= 65535 ? new Uint16Array(newIdx) : new Uint32Array(newIdx),
+  }
+}
 
 const MOVE_SPEED = 3
 const UP: [number, number, number] = [0, 0, 1]
@@ -52,7 +85,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const webgpuAvailable = !!navigator.gpu
   const savedBackend = localStorage.getItem('renderer-backend') as BackendType | null
   let currentCanvas = canvas
-  const scene = await createScene(currentCanvas, { maxEntities: 10000, backend: savedBackend ?? undefined })
+  const scene = await createScene(currentCanvas, { maxEntities: 1000, backend: savedBackend ?? undefined })
 
   // ── Input (demo-only) ────────────────────────────────────────────────
   const keys = new Set<string>()
@@ -92,6 +125,13 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   scene.shadow.far = 800
   scene.shadow.bias = 0.0001
 
+  // ── Bloom ───────────────────────────────────────────────────────────
+  scene.bloom.enabled = true
+  scene.bloom.intensity = 0.5
+  scene.bloom.threshold = 0
+  scene.bloom.radius = 1
+  scene.bloom.whiten = 0.5
+
   // ── Register geometries ───────────────────────────────────────────────
   const box = createBoxGeometry(2, 2, 2)
   const cubeGeo = scene.registerGeometry(box.vertices, box.indices)
@@ -118,28 +158,65 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const { meshes: glbMeshes } = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
   let axeMesh: Mesh | undefined
+  let axeBloomMesh: Mesh | undefined
   if (megaxe) {
-    const geo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
-    axeMesh = scene.add(
-      new Mesh({
-        geometry: geo,
-        position: [0, 0.3, 0],
-        rotation: [0, 0, Math.PI],
-        scale: megaxe.scale,
-        color: [1, 1, 1],
-      }),
-    )
+    if (megaxe.materialIndices) {
+      // Split: non-bloom materials (0,1) and bloom material (2)
+      const base = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx !== 2)
+      const glow = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx === 2)
+      if (base) {
+        const geo = scene.registerGeometry(base.vertices, base.indices)
+        axeMesh = scene.add(
+          new Mesh({
+            geometry: geo,
+            position: [0, 0.3, 0],
+            rotation: [0, 0, Math.PI],
+            scale: megaxe.scale,
+            color: [1, 1, 1],
+          }),
+        )
+      }
+      if (glow) {
+        const geo = scene.registerGeometry(glow.vertices, glow.indices)
+        axeBloomMesh = scene.add(
+          new Mesh({
+            geometry: geo,
+            position: [0, 0.3, 0],
+            rotation: [0, 0, Math.PI],
+            scale: megaxe.scale,
+            color: [1, 1, 1],
+            bloom: 1.0,
+          }),
+        )
+      }
+    } else {
+      const geo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
+      axeMesh = scene.add(
+        new Mesh({
+          geometry: geo,
+          position: [0, 0.3, 0],
+          rotation: [0, 0, Math.PI],
+          scale: megaxe.scale,
+          color: [1, 1, 1],
+        }),
+      )
+    }
   }
 
   // ── Load AO texture ──────────────────────────────────────────────────
   const aoTex = await loadKTX2('/city-ao.ktx2', '/basis-1.50/')
   const aoTexId = scene.registerTexture(aoTex.data, aoTex.width, aoTex.height)
 
-  // ── Eden (merged into 1 draw call with AO map) ─────────────────────
+  // ── Eden (merged into 1 draw call with AO map, bloom meshes kept separate) ──
+  const edenBloomNames = new Set(['Eden_24'])
   const edenMeshes = glbMeshes.filter(m => m.name.startsWith('Eden_'))
-  if (edenMeshes.length > 0) {
+  const edenNonBloom = edenMeshes.filter(m => !edenBloomNames.has(m.name))
+  const edenBloom = edenMeshes.filter(m => edenBloomNames.has(m.name))
+  const edenScale = edenMeshes[0]?.scale
+
+  if (edenNonBloom.length > 0) {
     const merged = mergeGeometries(
-      edenMeshes.map(em => ({
+      edenNonBloom.map(em => ({
         vertices: em.vertices,
         indices: em.indices,
         color: EDEN_COLORS[em.name] ?? [1, 1, 1],
@@ -148,13 +225,24 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     )
     if (merged.uvs) {
       const geo = scene.registerTexturedGeometry(merged.vertices, merged.indices, merged.uvs)
-      scene.add(
-        new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenMeshes[0]!.scale, color: [1, 1, 1], aoMap: aoTexId }),
-      )
+      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1], aoMap: aoTexId }))
     } else {
       const geo = scene.registerGeometry(merged.vertices, merged.indices)
-      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenMeshes[0]!.scale, color: [1, 1, 1] }))
+      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1] }))
     }
+  }
+
+  for (const em of edenBloom) {
+    const geo = scene.registerGeometry(em.vertices, em.indices)
+    scene.add(
+      new Mesh({
+        geometry: geo,
+        position: [0, 0, 0],
+        scale: edenScale,
+        color: EDEN_COLORS[em.name] ?? [1, 1, 1],
+        bloom: 1.0,
+      }),
+    )
   }
 
   // ── Load player GLB ───────────────────────────────────────────────────
@@ -211,9 +299,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     })
 
     // Attach megaxe to player's right hand bone
-    if (axeMesh) {
-      scene.attachToBone(axeMesh, player, 'Hand.R')
-    }
+    if (axeMesh) scene.attachToBone(axeMesh, player, 'Hand.R')
+    if (axeBloomMesh) scene.attachToBone(axeBloomMesh, player, 'Hand.R')
   }
 
   // ── Transparent cubes ─────────────────────────────────────────────────
@@ -236,6 +323,24 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       }),
     )
     cubes.push(cube)
+  }
+
+  // ── HTML overlay labels ──────────────────────────────────────────────
+  const labelStyle =
+    'color:#fff;font:bold 14px/1 sans-serif;background:rgba(0,0,0,0.6);padding:4px 8px;border-radius:4px;white-space:nowrap'
+
+  let overlay = new HtmlOverlay(currentCanvas)
+
+  const cubeLabel = document.createElement('div')
+  cubeLabel.textContent = 'Cubes'
+  cubeLabel.style.cssText = labelStyle
+  overlay.add(new HtmlElement({ position: [50, 80, 6], element: cubeLabel, distanceFactor: 20 }))
+
+  if (player) {
+    const playerLabel = document.createElement('div')
+    playerLabel.textContent = 'Player'
+    playerLabel.style.cssText = labelStyle
+    overlay.add(new HtmlElement({ mesh: player, offset: [0, 0, 4], element: playerLabel, distanceFactor: 20 }))
   }
 
   // ── Stats overlay ─────────────────────────────────────────────────────
@@ -279,6 +384,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     const { theta, phi, radius, targetX, targetY, targetZ } = orbit
     orbit.destroy()
+    overlay.destroy()
     resizeObs.disconnect()
 
     const newCanvas = document.createElement('canvas')
@@ -298,6 +404,15 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     orbit.targetY = targetY
     orbit.targetZ = targetZ
     orbit.updateEye()
+
+    overlay = new HtmlOverlay(currentCanvas)
+    overlay.add(new HtmlElement({ position: [50, 80, 6], element: cubeLabel, distanceFactor: 20 }))
+    if (player) {
+      const playerLabel2 = document.createElement('div')
+      playerLabel2.textContent = 'Player'
+      playerLabel2.style.cssText = labelStyle
+      overlay.add(new HtmlElement({ mesh: player, offset: [0, 0, 4], element: playerLabel2, distanceFactor: 20 }))
+    }
 
     observeResize()
     switching = false
@@ -366,6 +481,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     // Render
     scene.render()
+    overlay.update(scene)
     frames++
     requestAnimationFrame(loop)
   }
