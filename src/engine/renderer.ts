@@ -6,15 +6,9 @@ import {
   shadowDepthShader,
   skinnedShadowDepthShader,
 } from './shaders.ts'
+import { MODEL_SLOT_SIZE, JOINT_SLOT_SIZE, MAX_SKINNED_ENTITIES, SHADOW_MAP_SIZE, MSAA_SAMPLES } from './constants.ts'
 
 import type { SkinInstance } from './skin.ts'
-
-const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
-const MAX_JOINTS = 128
-const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
-const MAX_SKINNED_ENTITIES = 64
-const SHADOW_MAP_SIZE = 2048
-const MSAA_SAMPLES = 4
 
 export type BackendType = 'webgpu' | 'webgl'
 
@@ -131,6 +125,9 @@ export class Renderer implements IRenderer {
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24) // 6 planes × 4 floats
   private lightData = new Float32Array(32) // 128 bytes for lighting UBO
+  private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+  private shadowCamData = new Float32Array(32)
+  private skinnedSlotMap = new Map<number, number>() // entity → slot
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -710,7 +707,7 @@ export class Renderer implements IRenderer {
     const planes = this.frustumPlanes
 
     // Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
-    const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+    const modelSlot = this.modelSlot
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
 
@@ -726,7 +723,8 @@ export class Renderer implements IRenderer {
 
     // Upload joint matrices for skinned entities
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>() // entity → slot
+    const skinnedSlotMap = this.skinnedSlotMap
+    skinnedSlotMap.clear()
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
       const instId = scene.skinInstanceIds[i]!
@@ -752,9 +750,10 @@ export class Renderer implements IRenderer {
       // Upload shadow camera (light VP into view slot, identity into proj slot)
       // Shadow depth shaders use camera.projection * camera.view * worldPos
       // We store identity in projection and lightVP in view, so result = I * lightVP * worldPos = lightVP * worldPos
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
-      // Identity matrix for projection
+      // Identity matrix for projection (zero the rest, set diagonal)
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1

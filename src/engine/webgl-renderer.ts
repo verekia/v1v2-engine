@@ -9,14 +9,9 @@ import {
   glSkinnedShadowDepthVS,
   glShadowDepthFS,
 } from './webgl-shaders.ts'
+import { MODEL_SLOT_SIZE, JOINT_SLOT_SIZE, MAX_SKINNED_ENTITIES, SHADOW_MAP_SIZE } from './constants.ts'
 
 import type { IRenderer, RenderScene } from './renderer.ts'
-
-const MODEL_SLOT_SIZE = 256 // match WebGPU alignment
-const MAX_JOINTS = 128
-const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 8192 bytes per slot
-const MAX_SKINNED_ENTITIES = 64
-const SHADOW_MAP_SIZE = 2048
 
 // UBO binding points
 const UBO_CAMERA = 0
@@ -103,6 +98,8 @@ export class WebGLRenderer implements IRenderer {
   private frustumPlanes = new Float32Array(24)
   private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4)
   private lightData = new Float32Array(32) // 128 bytes
+  private shadowCamData = new Float32Array(32)
+  private skinnedSlotMap = new Map<number, number>() // entity → slot
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -420,7 +417,8 @@ export class WebGLRenderer implements IRenderer {
 
     // ── Upload joint matrices ────────────────────────────────────────
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>()
+    const skinnedSlotMap = this.skinnedSlotMap
+    skinnedSlotMap.clear()
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.jointUBO)
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
@@ -439,8 +437,10 @@ export class WebGLRenderer implements IRenderer {
     // ── Shadow depth pass ─────────────────────────────────────────────
     if (hasShadow) {
       // Upload shadow camera UBO (light VP as view, identity as projection)
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
+      // Identity matrix for projection (zero the rest, set diagonal)
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1

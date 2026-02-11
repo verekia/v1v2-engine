@@ -518,7 +518,16 @@ function readAccessorFloat32(accessor: any, gltf: any, bin: Uint8Array): Float32
   const byteOffset = (bv.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
   const count = accessor.count as number
   const componentCount = accessorTypeSize(accessor.type as string)
-  return new Float32Array(bin.buffer, bin.byteOffset + byteOffset, count * componentCount)
+  const total = count * componentCount
+  const absOffset = bin.byteOffset + byteOffset
+  // Float32Array requires 4-byte alignment; copy if the offset is misaligned
+  if (absOffset % 4 !== 0) {
+    const out = new Float32Array(total)
+    const src = new DataView(bin.buffer, absOffset, total * 4)
+    for (let i = 0; i < total; i++) out[i] = src.getFloat32(i * 4, true)
+    return out
+  }
+  return new Float32Array(bin.buffer, absOffset, total)
 }
 
 function readAccessorUint8(accessor: any, gltf: any, bin: Uint8Array): Uint8Array {
@@ -534,9 +543,15 @@ function readAccessorUint8(accessor: any, gltf: any, bin: Uint8Array): Uint8Arra
   }
   // Unsigned short joints → downconvert to uint8
   if (accessor.componentType === 5123) {
-    const u16 = new Uint16Array(bin.buffer, bin.byteOffset + byteOffset, total)
+    const absOffset = bin.byteOffset + byteOffset
     const out = new Uint8Array(total)
-    for (let i = 0; i < total; i++) out[i] = u16[i]!
+    if (absOffset % 2 !== 0) {
+      const src = new DataView(bin.buffer, absOffset, total * 2)
+      for (let i = 0; i < total; i++) out[i] = src.getUint16(i * 2, true)
+    } else {
+      const u16 = new Uint16Array(bin.buffer, absOffset, total)
+      for (let i = 0; i < total; i++) out[i] = u16[i]!
+    }
     return out
   }
   return new Uint8Array(bin.buffer, bin.byteOffset + byteOffset, total)
@@ -546,13 +561,26 @@ function readAccessorIndices(accessor: any, gltf: any, bin: Uint8Array): Uint16A
   const bv = gltf.bufferViews[accessor.bufferView]
   const byteOffset = (bv.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
   const count = accessor.count as number
+  const absOffset = bin.byteOffset + byteOffset
 
   // componentType: 5121=UNSIGNED_BYTE, 5123=UNSIGNED_SHORT, 5125=UNSIGNED_INT
   if (accessor.componentType === 5125) {
-    return new Uint32Array(bin.buffer, bin.byteOffset + byteOffset, count)
+    if (absOffset % 4 !== 0) {
+      const out = new Uint32Array(count)
+      const src = new DataView(bin.buffer, absOffset, count * 4)
+      for (let i = 0; i < count; i++) out[i] = src.getUint32(i * 4, true)
+      return out
+    }
+    return new Uint32Array(bin.buffer, absOffset, count)
   }
   if (accessor.componentType === 5123) {
-    return new Uint16Array(bin.buffer, bin.byteOffset + byteOffset, count)
+    if (absOffset % 2 !== 0) {
+      const out = new Uint16Array(count)
+      const src = new DataView(bin.buffer, absOffset, count * 2)
+      for (let i = 0; i < count; i++) out[i] = src.getUint16(i * 2, true)
+      return out
+    }
+    return new Uint16Array(bin.buffer, absOffset, count)
   }
   // Unsigned byte — upconvert to uint16
   const bytes = bin.subarray(byteOffset, byteOffset + count)

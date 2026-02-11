@@ -9,22 +9,13 @@ export { createSkeleton, createSkinInstance, updateSkinInstance, transitionTo } 
 export type { Skeleton, SkinInstance } from './skin.ts'
 export { cubeVertices, cubeIndices, createSphereGeometry, mergeGeometries } from './geometry.ts'
 export {
-  lambertShader,
-  skinnedLambertShader,
-  unlitShader,
-  shadowDepthShader,
-  skinnedShadowDepthShader,
-} from './shaders.ts'
-export {
-  glLambertVS,
-  glLambertFS,
-  glUnlitVS,
-  glUnlitFS,
-  glSkinnedLambertVS,
-  glShadowDepthVS,
-  glSkinnedShadowDepthVS,
-  glShadowDepthFS,
-} from './webgl-shaders.ts'
+  MODEL_SLOT_SIZE,
+  MAX_JOINTS,
+  JOINT_SLOT_SIZE,
+  MAX_SKINNED_ENTITIES,
+  SHADOW_MAP_SIZE,
+  MSAA_SAMPLES,
+} from './constants.ts'
 export {
   v3Set,
   v3Copy,

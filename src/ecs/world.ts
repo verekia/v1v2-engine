@@ -1,4 +1,4 @@
-const MAX_ENTITIES = 10_000
+const DEFAULT_MAX_ENTITIES = 10_000
 
 // Component bitmask IDs
 export const TRANSFORM = 1 << 0
@@ -9,29 +9,31 @@ export const SKINNED = 1 << 4
 export const UNLIT = 1 << 5
 
 export class World {
+  readonly maxEntities: number
   entityCount = 0
-  componentMask = new Uint32Array(MAX_ENTITIES)
+
+  componentMask: Uint32Array
 
   // Transform (SoA)
-  positions = new Float32Array(MAX_ENTITIES * 3)
-  rotations = new Float32Array(MAX_ENTITIES * 3)
-  scales = new Float32Array(MAX_ENTITIES * 3)
-  worldMatrices = new Float32Array(MAX_ENTITIES * 16)
+  positions: Float32Array
+  rotations: Float32Array
+  scales: Float32Array
+  worldMatrices: Float32Array
 
   // MeshInstance
-  geometryIds = new Uint8Array(MAX_ENTITIES)
-  colors = new Float32Array(MAX_ENTITIES * 3)
-  alphas = new Float32Array(MAX_ENTITIES).fill(1)
+  geometryIds: Uint8Array
+  colors: Float32Array
+  alphas: Float32Array
 
   // Skinned
-  skinInstanceIds = new Int16Array(MAX_ENTITIES).fill(-1)
+  skinInstanceIds: Int16Array
 
   // Camera
-  fovs = new Float32Array(MAX_ENTITIES)
-  nears = new Float32Array(MAX_ENTITIES)
-  fars = new Float32Array(MAX_ENTITIES)
-  viewMatrices = new Float32Array(MAX_ENTITIES * 16)
-  projMatrices = new Float32Array(MAX_ENTITIES * 16)
+  fovs: Float32Array
+  nears: Float32Array
+  fars: Float32Array
+  viewMatrices: Float32Array
+  projMatrices: Float32Array
 
   // Lighting (global)
   directionalLightDir = new Float32Array(3)
@@ -40,8 +42,44 @@ export class World {
 
   activeCamera = -1
 
+  // Free list for entity recycling (LIFO stack)
+  private freeList: number[] = []
+
+  constructor(maxEntities = DEFAULT_MAX_ENTITIES) {
+    this.maxEntities = maxEntities
+
+    this.componentMask = new Uint32Array(maxEntities)
+
+    this.positions = new Float32Array(maxEntities * 3)
+    this.rotations = new Float32Array(maxEntities * 3)
+    this.scales = new Float32Array(maxEntities * 3)
+    this.worldMatrices = new Float32Array(maxEntities * 16)
+
+    this.geometryIds = new Uint8Array(maxEntities)
+    this.colors = new Float32Array(maxEntities * 3)
+    this.alphas = new Float32Array(maxEntities).fill(1)
+
+    this.skinInstanceIds = new Int16Array(maxEntities).fill(-1)
+
+    this.fovs = new Float32Array(maxEntities)
+    this.nears = new Float32Array(maxEntities)
+    this.fars = new Float32Array(maxEntities)
+    this.viewMatrices = new Float32Array(maxEntities * 16)
+    this.projMatrices = new Float32Array(maxEntities * 16)
+  }
+
   createEntity(): number {
+    if (this.freeList.length > 0) {
+      return this.freeList.pop()!
+    }
     return this.entityCount++
+  }
+
+  destroyEntity(e: number): void {
+    this.componentMask[e] = 0
+    this.skinInstanceIds[e] = -1
+    this.alphas[e] = 1
+    this.freeList.push(e)
   }
 
   addTransform(

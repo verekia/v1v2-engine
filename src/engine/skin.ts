@@ -1,8 +1,7 @@
 import { m4FromQuatTRS, m4Multiply, v3Lerp, quatSlerp } from './math.ts'
+import { MAX_JOINTS } from './constants.ts'
 
 import type { GltfSkin, GltfAnimation, GltfNodeTransform } from './gltf.ts'
-
-const MAX_JOINTS = 128
 
 export interface Skeleton {
   jointCount: number
