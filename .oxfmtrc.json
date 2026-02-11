@@ -36,5 +36,5 @@
     "ignoreCase": true
   },
   "experimentalTailwindcss": {},
-  "ignorePatterns": ["node_modules", "dist", "out", ".next", ".glb", "public/draco-1.5.7", "public/basis-1.50"]
+  "ignorePatterns": ["node_modules", "dist", "out", ".next", "public/draco-1.5.7", "public/basis-1.50"]
 }
