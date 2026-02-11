@@ -4,7 +4,7 @@ const HALF_PI = Math.PI / 2 - 0.001 // clamp to avoid gimbal flip
 export class OrbitControls {
   // Spherical coordinates
   theta = 0          // horizontal angle (radians)
-  phi = Math.PI / 6  // vertical angle (radians, 0 = top, PI = bottom)
+  phi = Math.PI / 6  // vertical angle (radians, 0 = horizon, +PI/2 = above)
   radius = 10
 
   // Target (orbit center)
@@ -56,8 +56,8 @@ export class OrbitControls {
     this.prevY = e.clientY
 
     if (this.dragging === 'rotate') {
-      this.theta -= dx * this.rotateSensitivity
-      this.phi -= dy * this.rotateSensitivity
+      this.theta += dx * this.rotateSensitivity
+      this.phi += dy * this.rotateSensitivity
       // Wrap theta
       if (this.theta > TWO_PI) this.theta -= TWO_PI
       if (this.theta < 0) this.theta += TWO_PI
@@ -68,14 +68,14 @@ export class OrbitControls {
       // Pan: move target along camera-local right and up
       const sinT = Math.sin(this.theta)
       const cosT = Math.cos(this.theta)
-      // Right vector (in xz plane)
+      // Right vector (in xy plane)
       const rx = cosT
-      const rz = -sinT
-      // Up vector: world up for simplicity
+      const ry = -sinT
+      // Up vector: world Z for simplicity
       const panScale = this.panSensitivity * this.radius * 0.1
-      this.targetX -= (dx * rx) * panScale
-      this.targetZ -= (dx * rz) * panScale
-      this.targetY += dy * panScale
+      this.targetX += (dx * rx) * panScale
+      this.targetY += (dx * ry) * panScale
+      this.targetZ += dy * panScale
     }
 
     this.updateEye()
@@ -96,8 +96,8 @@ export class OrbitControls {
   private updateEye(): void {
     const cosPhi = Math.cos(this.phi)
     this.eye[0] = this.targetX + this.radius * cosPhi * Math.sin(this.theta)
-    this.eye[1] = this.targetY + this.radius * Math.sin(this.phi)
-    this.eye[2] = this.targetZ + this.radius * cosPhi * Math.cos(this.theta)
+    this.eye[1] = this.targetY + this.radius * cosPhi * Math.cos(this.theta)
+    this.eye[2] = this.targetZ + this.radius * Math.sin(this.phi)
     this.target[0] = this.targetX
     this.target[1] = this.targetY
     this.target[2] = this.targetZ

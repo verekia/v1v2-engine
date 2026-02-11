@@ -1,13 +1,13 @@
 // GLB/glTF loader with Draco mesh compression support
 
-import { quatToEulerYXZ } from './math.ts'
+import { quatToEulerZXY } from './math.ts'
 
 export interface GltfMesh {
   name: string
   vertices: Float32Array // interleaved [px,py,pz, nx,ny,nz, cr,cg,cb]
   indices: Uint16Array | Uint32Array
   position: [number, number, number]
-  rotation: [number, number, number] // euler YXZ
+  rotation: [number, number, number] // euler ZXY
   scale: [number, number, number]
   color: [number, number, number]
   skinJoints?: Uint8Array
@@ -216,7 +216,7 @@ export async function loadGlb(
       qBuf[1] = node.rotation[1]
       qBuf[2] = node.rotation[2]
       qBuf[3] = node.rotation[3]
-      quatToEulerYXZ(rBuf, 0, qBuf, 0)
+      quatToEulerZXY(rBuf, 0, qBuf, 0)
       rotation = [rBuf[0]!, rBuf[1]!, rBuf[2]!]
     }
     if (node.scale) {
@@ -406,7 +406,7 @@ function decodeDracoPrimitive(
       vertices[vi + 4] = normArray.GetValue(i * 3 + 1)
       vertices[vi + 5] = normArray.GetValue(i * 3 + 2)
     } else {
-      vertices[vi + 4] = 1 // default up normal
+      vertices[vi + 5] = 1 // default up normal (+Z)
     }
     // Vertex color from material index
     if (matIdxArray && materialColors) {
@@ -478,7 +478,7 @@ function decodeStandardPrimitive(
       vertices[vi + 4] = normals[i * 3 + 1]!
       vertices[vi + 5] = normals[i * 3 + 2]!
     } else {
-      vertices[vi + 4] = 1
+      vertices[vi + 5] = 1 // default up normal (+Z)
     }
     // Default white vertex color
     vertices[vi + 6] = 1
