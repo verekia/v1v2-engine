@@ -1,6 +1,6 @@
 {
   "name": "@v1v2/engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "files": [
     "dist"
   ],
@@ -27,7 +27,8 @@
     "format:check": "oxfmt --check .",
     "buntest": "bun test",
     "all": "bun run lint && bun run format:check && bun run buntest && bun run typecheck",
-    "prepare": "husky"
+    "prepare": "husky",
+    "pub": "bun run build:library && npm publish"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.18",
