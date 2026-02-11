@@ -1,3 +1,5 @@
+export { createScene, Scene, Mesh, Camera } from './scene.ts'
+export type { MeshOptions, ShadowConfig } from './scene.ts'
 export { createRenderer } from './gpu.ts'
 export { Renderer } from './renderer.ts'
 export { WebGLRenderer } from './webgl-renderer.ts'

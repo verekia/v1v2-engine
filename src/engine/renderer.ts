@@ -47,9 +47,7 @@ export interface IRenderer {
 
 export interface RenderScene {
   cameraView: Float32Array
-  cameraViewOffset: number
   cameraProj: Float32Array
-  cameraProjOffset: number
   lightDirection: Float32Array
   lightDirColor: Float32Array
   lightAmbientColor: Float32Array
@@ -663,14 +661,14 @@ export class Renderer implements IRenderer {
       this.cameraBuffer,
       0,
       scene.cameraView.buffer as ArrayBuffer,
-      scene.cameraView.byteOffset + scene.cameraViewOffset * 4,
+      scene.cameraView.byteOffset,
       64,
     )
     device.queue.writeBuffer(
       this.cameraBuffer,
       64,
       scene.cameraProj.buffer as ArrayBuffer,
-      scene.cameraProj.byteOffset + scene.cameraProjOffset * 4,
+      scene.cameraProj.byteOffset,
       64,
     )
 
@@ -705,7 +703,7 @@ export class Renderer implements IRenderer {
 
     // ── Frustum culling setup ───────────────────────────────────────────
     // VP = projection * view
-    m4Multiply(this.vpMat, 0, scene.cameraProj, scene.cameraProjOffset, scene.cameraView, scene.cameraViewOffset)
+    m4Multiply(this.vpMat, 0, scene.cameraProj, 0, scene.cameraView, 0)
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
@@ -925,14 +923,13 @@ export class Renderer implements IRenderer {
 
     // ── Transparent pass (sorted back-to-front) ────────────────────────
     // Extract camera eye from view matrix (column-major)
-    const vo = scene.cameraViewOffset
     const vm = scene.cameraView
-    const tx = vm[vo + 12]!,
-      ty = vm[vo + 13]!,
-      tz = vm[vo + 14]!
-    const camX = -(vm[vo]! * tx + vm[vo + 1]! * ty + vm[vo + 2]! * tz)
-    const camY = -(vm[vo + 4]! * tx + vm[vo + 5]! * ty + vm[vo + 6]! * tz)
-    const camZ = -(vm[vo + 8]! * tx + vm[vo + 9]! * ty + vm[vo + 10]! * tz)
+    const tx = vm[12]!,
+      ty = vm[13]!,
+      tz = vm[14]!
+    const camX = -(vm[0]! * tx + vm[1]! * ty + vm[2]! * tz)
+    const camY = -(vm[4]! * tx + vm[5]! * ty + vm[6]! * tz)
+    const camZ = -(vm[8]! * tx + vm[9]! * ty + vm[10]! * tz)
 
     const tpOrder = this._tpOrder
     const tpDist = this._tpDist

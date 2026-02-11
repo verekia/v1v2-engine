@@ -16,45 +16,71 @@ Default to **Bun** instead of Node.js for all commands (`bun <file>`, `bun insta
 
 TypeScript is strict with `noUncheckedIndexedAccess` enabled — all indexed TypedArray accesses need `!` assertions. WebGPU types come from `@webgpu/types`.
 
-All `src/` imports use explicit `.ts` extensions (`from './ecs.ts'`), enabled by `allowImportingTsExtensions` in tsconfig.
+All `src/` imports use explicit `.ts` extensions (`from './scene.ts'`), enabled by `allowImportingTsExtensions` in tsconfig.
 
 When passing TypedArrays to `device.queue.writeBuffer`, cast the buffer: `writeBuffer(buf, 0, arr.buffer as ArrayBuffer, arr.byteOffset, arr.byteLength)` — strict TS rejects `ArrayBufferLike` where `ArrayBuffer` is expected.
 
 ## Architecture
 
-**Mana Engine** is a minimal WebGPU ECS game engine using a **right-handed Z-up coordinate system** (Blender convention): +X right, +Y forward, +Z up. glTF assets are exported from Blender with the "Y up" option unchecked to preserve Z-up coordinates — no axis conversion needed at load time.
+**Mana Engine** is a minimal WebGPU/WebGL rendering engine using a **right-handed Z-up coordinate system** (Blender convention): +X right, +Y forward, +Z up. glTF assets are exported from Blender with the "Y up" option unchecked to preserve Z-up coordinates — no axis conversion needed at load time.
 
 Next.js serves a single page (`pages/index.tsx`) that mounts a fullscreen `<canvas>` and dynamically imports the engine (`src/main.ts`) to avoid SSR issues with browser APIs.
 
-The engine is pure TypeScript with no React dependency. Engine code is split into two independent libraries under `src/`:
+The engine is pure TypeScript with no React dependency. All engine code lives under `src/engine/`:
 
-- **`src/engine/`** — Graphics library (like three.js). Zero dependency on ECS. Contains: `math.ts`, `geometry.ts`, `shaders.ts`, `gpu.ts` (WebGPU init), `renderer.ts` (decoupled via `RenderScene` interface), `orbit-controls.ts`, `gltf.ts`, `skin.ts`, `index.ts` (barrel export).
-- **`src/ecs/`** — Optional ECS library. Zero dependency on engine. Contains: `world.ts` (renamed from `ecs.ts`), `input.ts`, `index.ts` (barrel export).
-- **`src/main.ts`** — Demo app that consumes both libraries and bridges them via the `RenderScene` interface.
+- **`scene.ts`** — `Scene`, `Mesh`, `Camera` classes and `createScene()` factory. The Scene manages the full lifecycle: geometry registration, mesh management, camera, lighting, shadows, and rendering.
+- **`renderer.ts`** — WebGPU renderer. Accepts `RenderScene` interface (internal contract between Scene and renderer).
+- **`webgl-renderer.ts`** — WebGL2 fallback renderer, same `RenderScene` interface.
+- **`gpu.ts`** — `createRenderer()` factory (picks WebGPU or WebGL).
+- **`math.ts`** — Zero-allocation vec3/mat4 math (all write to pre-allocated Float32Arrays).
+- **`geometry.ts`** — Cube/sphere primitives, `mergeGeometries()`.
+- **`gltf.ts`** — GLB/glTF loader with Draco support.
+- **`skin.ts`** — GPU skinning: skeleton, skin instances, animation sampling.
+- **`orbit-controls.ts`** — Spherical orbit camera controls.
+- **`shaders.ts`** / **`webgl-shaders.ts`** — WGSL and GLSL shader sources.
+- **`index.ts`** — Barrel export.
+- **`src/main.ts`** — Demo app that consumes the engine.
 
-The **`RenderScene` bridge pattern** (`renderer.ts`): The renderer accepts a `RenderScene` interface with pre-computed `renderMask`/`skinnedMask` Uint8Arrays and direct references to the World's typed arrays (zero-copy). `main.ts` builds the `RenderScene` each frame from ECS bitmask checks, keeping the renderer completely ECS-agnostic. `gpu.ts` exports the standalone `initGPU()` factory extracted from the renderer.
+### Consumer API (Three.js-like):
 
-### Per-frame system execution order (game loop in `main.ts`):
+```ts
+const scene = await createScene(canvas)
 
-1. **Input system** — WASD keyboard state applied to entities with `TRANSFORM | INPUT_RECEIVER`
-2. **Animation system** — `updateSkinInstance()` for each `SkinInstance`: advance time, sample keyframes, compute joint matrices
-3. **Transform system** — Compute `worldMatrix` from position/rotation/scale via `m4FromTRS`
-4. **Camera system** — Compute view matrix from OrbitControls' `eye`/`target` Float32Arrays, and projection matrix
-5. **Render system** — Frustum cull, upload uniforms, issue draw calls (static pass then skinned pass)
+const geo = scene.registerGeometry(vertices, indices)
+const mesh = scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], color: [1, 0, 0] }))
+
+scene.camera.fov = Math.PI / 3
+scene.camera.eye.set([0, -10, 5])
+scene.camera.target.set([0, 0, 0])
+
+scene.setDirectionalLight([-1, -1, -2], [0.5, 0.5, 0.5])
+scene.setAmbientLight([0.8, 0.8, 0.8])
+
+scene.shadow.enabled = true
+
+function loop() {
+  mesh.rotation[2] += 0.01
+  scene.render()
+  requestAnimationFrame(loop)
+}
+requestAnimationFrame(loop)
+```
+
+### Internal performance architecture:
+
+Internally, `Scene` uses a **Structure-of-Arrays** layout — parallel TypedArrays for positions, scales, world matrices, colors, etc. On each `scene.render()` call, mesh object data is synced to these dense arrays, world matrices are computed via `m4FromTRS`, and the result is passed to the renderer as a zero-copy `RenderScene` interface. This gives Three.js-like ergonomics with ECS-level cache performance.
 
 ### Key design patterns:
 
-- **Zero-allocation math** (`engine/math.ts`): All vec3/mat4 functions write to a pre-allocated `Float32Array` at a given offset. No temp objects, no GC pressure in the hot path. Includes `quatToEulerZXY` for glTF quaternion → Euler conversion matching the Z×X×Y rotation order (Z-up coordinate system). Animation math: `v3Lerp`, `quatSlerp`, `m4FromQuatTRS` (builds mat4 from quaternion + TRS).
-- **Structure-of-Arrays ECS** (`ecs/world.ts`): Component data stored as parallel TypedArrays (e.g., `positions: Float32Array[MAX*3]`), not per-entity objects. Component presence tracked via bitmasks (`TRANSFORM = 1 << 0`, `SKINNED = 1 << 4`, etc.) with inline iteration — no query abstraction. Skinned entities store a `skinInstanceIds` index into an external `SkinInstance[]` array.
-- **Dynamic uniform buffer** (`engine/renderer.ts`): Per-entity model data packed into 256-byte aligned slots in a single GPU buffer, bound via dynamic offsets to avoid per-entity bind group allocation.
-- **Frustum culling** (`engine/renderer.ts` + `engine/math.ts`): Gribb-Hartmann plane extraction from the VP matrix, bounding sphere test per entity before upload and draw.
-- **OrbitControls** (`engine/orbit-controls.ts`): Spherical coordinates (theta/phi/radius) around a target point with Z as the vertical axis. Outputs `eye` and `target` Float32Arrays consumed by the camera system's `m4LookAt`. Left-drag orbits, right-drag pans (in XY plane + Z), scroll zooms.
-- **GLB/glTF loader** (`engine/gltf.ts`): Loads `.glb` files with Draco mesh compression (`KHR_draco_mesh_compression`). Draco WASM decoder loaded at runtime from `public/draco-1.5.7/` via `<script>` tag (singleton, no npm package). Supports reading custom `_MATERIALINDEX` vertex attribute from Draco data to assign per-vertex colors via a `materialColors` map. Outputs interleaved vertices matching the engine's format. Falls back to standard accessor-based decoding for non-Draco primitives. Returns `GlbResult { meshes, skins, animations, nodeTransforms }` — parses node hierarchy, skins (joints + inverseBindMatrices), animations (channels with keyframe samplers), and JOINTS_0/WEIGHTS_0 attributes for skinned meshes.
-- **GPU Skinning** (`engine/skin.ts` + `engine/renderer.ts`): `Skeleton` holds joint node indices + inverse bind matrices. `SkinInstance` holds per-instance animation state + pre-allocated scratch buffers. `updateSkinInstance()` samples animation keyframes (binary search + lerp/slerp), traverses node hierarchy parent-first to compute global matrices, then multiplies by inverse bind matrices. Renderer uses a separate `skinnedPipeline` with two vertex buffers (buffer 0: pos/norm/color stride 36, buffer 1: joints uint8x4 + weights float32x4 stride 20) and a `read-only-storage` joint matrices buffer (group 3, dynamic offset, 128 joints × 64 bytes = 8192 per slot).
-
-### Demo scene (`main.ts`):
-
-The demo scene contains a skinned player (Body mesh from `player-bundle.glb` with Run animation looping), a single megaxe, an Eden environment (merged into 1 draw call), and a 7×5 sphere grid. The player entity has `SKINNED` + `INPUT_RECEIVER` components and is movable with WASD. Renderer `maxEntities` is set to 10,000 (matching ECS limit). Stats overlay shows FPS and draw call count (updated every 500ms).
+- **Zero-allocation math** (`engine/math.ts`): All vec3/mat4 functions write to a pre-allocated `Float32Array` at a given offset. No temp objects, no GC pressure in the hot path. Animation math: `v3Lerp`, `quatSlerp`, `m4FromQuatTRS`.
+- **Sync-to-arrays** (`engine/scene.ts`): Mesh objects own small Float32Arrays for position/rotation/scale/color. Before each render, a tight loop copies these into SoA arrays and computes world matrices. The renderer iterates dense arrays, not scattered objects.
+- **Auto geometry management** (`engine/scene.ts`): `scene.registerGeometry()` returns an auto-assigned ID, tracks registrations internally, and re-registers on backend switch — consumers never manage IDs.
+- **Dynamic uniform buffer** (`engine/renderer.ts`): Per-entity model data packed into 256-byte aligned slots in a single GPU buffer, bound via dynamic offsets.
+- **Frustum culling** (`engine/renderer.ts` + `engine/math.ts`): Gribb-Hartmann plane extraction from the VP matrix, bounding sphere test per entity.
+- **Shadow auto-computation** (`engine/scene.ts`): When `scene.shadow.enabled = true`, the Scene computes the light VP matrix from the directional light direction + shadow config (target, distance, extent, near/far).
+- **OrbitControls** (`engine/orbit-controls.ts`): Spherical coordinates around a target point with Z as vertical. Consumer feeds `orbit.eye`/`orbit.target` into `scene.camera.eye`/`scene.camera.target`.
+- **GLB/glTF loader** (`engine/gltf.ts`): Loads `.glb` with Draco mesh compression. Draco WASM loaded from `public/draco-1.5.7/`. Returns `GlbResult { meshes, skins, animations, nodeTransforms }`.
+- **GPU Skinning** (`engine/skin.ts` + `engine/renderer.ts`): Separate skinned pipeline with joint matrices storage buffer. `updateSkinInstance()` samples keyframes and computes joint matrices.
 
 ### Shader bind group layout (WGSL in `engine/shaders.ts`):
 
@@ -65,4 +91,4 @@ The demo scene contains a skinned player (Body mesh from `player-bundle.glb` wit
 
 ### Geometry format:
 
-Interleaved vertex data: `[px, py, pz, nx, ny, nz, cr, cg, cb]` per vertex (stride 36 bytes). Vertex colors are multiplied with the per-entity uniform color in the fragment shader — set vertex colors to white `[1,1,1]` for uniform-only coloring, or set uniform color to white for vertex-color-only coloring. Cube is static data, sphere is procedurally generated via `createSphereGeometry(stacks, slices)`. GLB meshes loaded via `loadGlb()` support both uint16 and uint32 index buffers (auto-detected). `mergeGeometries()` in `engine/geometry.ts` merges multiple primitives into a single geometry, baking per-primitive colors into vertex RGB and reindexing — use this to collapse multi-material glTF meshes into one draw call with a white uniform.
+Interleaved vertex data: `[px, py, pz, nx, ny, nz, cr, cg, cb]` per vertex (stride 36 bytes). Vertex colors are multiplied with the per-entity uniform color in the fragment shader — set vertex colors to white `[1,1,1]` for uniform-only coloring, or set uniform color to white for vertex-color-only coloring. GLB meshes loaded via `loadGlb()` support both uint16 and uint32 index buffers. `mergeGeometries()` merges multiple primitives into a single geometry, baking per-primitive colors into vertex RGB.
