@@ -775,8 +775,21 @@ export class Scene {
         cy /= 8
         cz /= 8
 
+        // Bounding sphere radius of frustum slice (rotation-invariant)
+        // Using the sphere instead of a tight AABB for X/Y ensures shadow casters
+        // near but outside the camera frustum are still captured in the shadow map
+        let sphereR2 = 0
+        for (let i = 0; i < 8; i++) {
+          const dx = fc[i * 3]! - cx
+          const dy = fc[i * 3 + 1]! - cy
+          const dz = fc[i * 3 + 2]! - cz
+          const d2 = dx * dx + dy * dy + dz * dz
+          if (d2 > sphereR2) sphereR2 = d2
+        }
+        const sphereRadius = Math.sqrt(sphereR2)
+
         // Light view: look from center - lightDir * backoff toward center
-        const backoff = farDist - nearDist + 200
+        const backoff = farDist - nearDist + shadowFar
         const lEx = cx - this._lightDirNorm[0]! * backoff
         const lEy = cy - this._lightDirNorm[1]! * backoff
         const lEz = cz - this._lightDirNorm[2]! * backoff
@@ -790,11 +803,7 @@ export class Scene {
         centerTmp[2] = cz
         m4LookAt(this._lightView, 0, lightEyeTmp, 0, centerTmp, 0, lightUp, 0)
 
-        // Transform all 8 corners to light space and find AABB
-        let minX = Infinity,
-          maxX = -Infinity
-        let minY = Infinity,
-          maxY = -Infinity
+        // Transform frustum corners to light space for Z range
         let minZ = Infinity,
           maxZ = -Infinity
         for (let i = 0; i < 8; i++) {
@@ -802,24 +811,23 @@ export class Scene {
             wy = fc[i * 3 + 1]!,
             wz = fc[i * 3 + 2]!
           m4TransformPoint(this._lightCorner, 0, this._lightView, 0, wx, wy, wz)
-          const lx = this._lightCorner[0]!,
-            ly = this._lightCorner[1]!,
-            lz = this._lightCorner[2]!
-          if (lx < minX) minX = lx
-          if (lx > maxX) maxX = lx
-          if (ly < minY) minY = ly
-          if (ly > maxY) maxY = ly
+          const lz = this._lightCorner[2]!
           if (lz < minZ) minZ = lz
           if (lz > maxZ) maxZ = lz
         }
 
-        // Extend Z range to capture shadow casters behind the frustum
-        minZ -= 200
+        // Extend Z range in both directions to capture shadow casters outside the camera frustum
+        // minZ: casters behind the frustum (farther from light)
+        // maxZ: casters between the light and frustum (closer to light, e.g. objects above camera)
+        minZ -= shadowFar
+        maxZ += shadowFar
+        if (maxZ > -1) maxZ = -1
 
         // Build ortho projection for this cascade
-        // ortho() expects positive near/far distances; light-space Z is negative for objects
-        // in front of the camera, so negate and swap: near = -maxZ, far = -minZ
-        this._renderer.ortho(this._lightProj, 0, minX, maxX, minY, maxY, -maxZ, -minZ)
+        // X/Y: bounding sphere ensures casters near but outside the frustum are captured
+        // Z: ortho() expects positive near/far distances; light-space Z is negative,
+        // so negate and swap: near = -maxZ, far = -minZ
+        this._renderer.ortho(this._lightProj, 0, -sphereRadius, sphereRadius, -sphereRadius, sphereRadius, -maxZ, -minZ)
 
         // VP = proj * view
         m4Multiply(this._cascadeVPs, c * 16, this._lightProj, 0, this._lightView, 0)
