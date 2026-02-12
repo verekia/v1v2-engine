@@ -1,0 +1,132 @@
+import type { Scene } from './scene.ts'
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export interface SchedulerState {
+  /** The scene instance */
+  scene: Scene
+  /** Delta time in seconds since last frame (capped at 0.1s) */
+  dt: number
+  /** Total elapsed time in seconds since scheduler start */
+  elapsed: number
+  /** Frame number (increments every rAF tick) */
+  frame: number
+}
+
+export interface SchedulerCallbackOptions {
+  /** Execution order among callbacks. Lower values run first. Default: 0. Can be negative. */
+  priority?: number
+  /** Throttle this callback to at most N executions per second. 0 or omitted = every frame. */
+  fps?: number
+}
+
+export type SchedulerCallback = (state: SchedulerState) => void
+
+// ── Internal entry ───────────────────────────────────────────────────────────
+
+interface SchedulerEntry {
+  callback: SchedulerCallback
+  priority: number
+  fpsInterval: number // 0 = no throttle, else milliseconds between calls
+  lastRunTime: number
+}
+
+// ── Scheduler ────────────────────────────────────────────────────────────────
+
+export class Scheduler {
+  private _scene: Scene
+  private _entries: SchedulerEntry[] = []
+  private _sorted = true
+  private _rafId = 0
+  private _lastTime = 0
+  private _elapsed = 0
+  private _frame = 0
+  private _running = false
+
+  // Reusable state object — avoids per-frame allocation
+  private _state: SchedulerState
+
+  constructor(scene: Scene) {
+    this._scene = scene
+    this._state = { scene, dt: 0, elapsed: 0, frame: 0 }
+  }
+
+  /**
+   * Register a callback to be called each frame (or throttled via `fps`).
+   * Returns an unsubscribe function that removes the callback.
+   */
+  register(callback: SchedulerCallback, options?: SchedulerCallbackOptions): () => void {
+    const entry: SchedulerEntry = {
+      callback,
+      priority: options?.priority ?? 0,
+      fpsInterval: options?.fps ? 1000 / options.fps : 0,
+      lastRunTime: 0,
+    }
+    this._entries.push(entry)
+    this._sorted = false
+
+    return () => {
+      const idx = this._entries.indexOf(entry)
+      if (idx >= 0) this._entries.splice(idx, 1)
+    }
+  }
+
+  /** Start the rAF loop. No-op if already running. */
+  start(): void {
+    if (this._running) return
+    this._running = true
+    this._lastTime = performance.now()
+    this._rafId = requestAnimationFrame(this._loop)
+  }
+
+  /** Stop the rAF loop. Can be resumed with start(). */
+  stop(): void {
+    this._running = false
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId)
+      this._rafId = 0
+    }
+  }
+
+  /** Stop the loop and remove all callbacks. */
+  destroy(): void {
+    this.stop()
+    this._entries.length = 0
+  }
+
+  private _loop = (now: number): void => {
+    if (!this._running) return
+
+    const dt = Math.min((now - this._lastTime) / 1000, 0.1)
+    this._lastTime = now
+    this._elapsed += dt
+    this._frame++
+
+    // Sort by priority (ascending) when entries have changed
+    if (!this._sorted) {
+      this._entries.sort((a, b) => a.priority - b.priority)
+      this._sorted = true
+    }
+
+    // Update shared state object
+    const state = this._state
+    state.dt = dt
+    state.elapsed = this._elapsed
+    state.frame = this._frame
+
+    // Execute callbacks in priority order
+    for (let i = 0; i < this._entries.length; i++) {
+      const entry = this._entries[i]!
+
+      // Per-callback FPS throttle
+      if (entry.fpsInterval > 0) {
+        if (now - entry.lastRunTime < entry.fpsInterval) continue
+        entry.lastRunTime = now
+      }
+
+      entry.callback(state)
+    }
+
+    this._rafId = requestAnimationFrame(this._loop)
+  }
+}

@@ -14,6 +14,7 @@ import {
   createRaycastHit,
   HtmlOverlay,
   HtmlElement,
+  Scheduler,
 } from './engine/index.ts'
 
 import type { BackendType } from './engine/index.ts'
@@ -474,7 +475,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   }, 500)
 
   // ── Backend toggle ────────────────────────────────────────────────────
-  let switching = false
+  let scheduler: Scheduler
   let resizeObs: ResizeObserver
 
   function observeResize() {
@@ -495,7 +496,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   async function switchBackend(type: BackendType) {
     if (scene.backendType === type) return
-    switching = true
+    scheduler.stop()
 
     const { theta, phi, radius, targetX, targetY, targetZ } = orbit
     orbit.destroy()
@@ -530,7 +531,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     }
 
     observeResize()
-    switching = false
+    scheduler.start()
   }
 
   // ── Controls panel (top-right) ──────────────────────────────────────
@@ -589,27 +590,30 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const rayHit = createRaycastHit()
   const edenFilter = edenWorldMesh ? ([edenWorldMesh] as readonly Mesh[]) : undefined
 
-  // ── Game loop ─────────────────────────────────────────────────────────
-  let lastTime = performance.now()
+  // ── Scheduler ─────────────────────────────────────────────────────────
+  scheduler = new Scheduler(scene)
 
-  function loop(now: number) {
-    if (switching) {
-      requestAnimationFrame(loop)
-      return
-    }
-    const dt = Math.min((now - lastTime) / 1000, 0.1)
-    lastTime = now
+  // Input (runs first)
+  scheduler.register(
+    ({ dt }) => {
+      if (player) {
+        if (keys.has('KeyW')) player.position[1]! += MOVE_SPEED * dt
+        if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
+        if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
+        if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
+      }
+      for (const cube of cubes) cube.rotation[2]! += dt
+      for (const cb of animCycleCallbacks) cb(dt)
+      for (const inst of scene.skinInstances) updateSkinInstance(inst, playerResult.animations, dt)
+    },
+    { priority: -2 },
+  )
 
-    // Input
-    if (player) {
-      if (keys.has('KeyW')) player.position[1]! += MOVE_SPEED * dt
-      if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
-      if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
-      if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
-
-      // Snap player to ground via downward raycast against Eden world
-      if (edenFilter) {
-        const hit = scene.raycast(
+  // Raycast (runs after input)
+  scheduler.register(
+    ({ scene: s }) => {
+      if (player && edenFilter) {
+        const hit = s.raycast(
           player.position[0]!,
           player.position[1]!,
           player.position[2]! + 50,
@@ -623,25 +627,21 @@ export async function startDemo(canvas: HTMLCanvasElement) {
           player.position[2] = rayHit.pointZ
         }
       }
-    }
+      s.camera.eye.set(orbit.eye)
+      s.camera.target.set(orbit.target)
+    },
+    { priority: -1 },
+  )
 
-    // Rotate cubes
-    for (const cube of cubes) cube.rotation[2]! += dt
+  // Render (runs last)
+  scheduler.register(
+    ({ scene: s }) => {
+      s.render()
+      overlay.update(s)
+      frames++
+    },
+    { priority: 0 },
+  )
 
-    // Animations
-    for (const cb of animCycleCallbacks) cb(dt)
-    for (const inst of scene.skinInstances) updateSkinInstance(inst, playerResult.animations, dt)
-
-    // Camera — feed orbit controls into scene camera
-    scene.camera.eye.set(orbit.eye)
-    scene.camera.target.set(orbit.target)
-
-    // Render
-    scene.render()
-    overlay.update(scene)
-    frames++
-    requestAnimationFrame(loop)
-  }
-
-  requestAnimationFrame(loop)
+  scheduler.start()
 }
