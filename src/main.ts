@@ -11,6 +11,7 @@ import {
   createBoxGeometry,
   createSphereGeometry,
   mergeGeometries,
+  createRaycastHit,
   HtmlOverlay,
   HtmlElement,
 } from './engine/index.ts'
@@ -222,6 +223,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const edenBloom = edenMeshes.filter(m => edenBloomNames.has(m.name))
   const edenScale = edenMeshes[0]?.scale
 
+  let edenWorldMesh: Mesh | undefined
   if (edenNonBloom.length > 0) {
     const merged = mergeGeometries(
       edenNonBloom.map(em => ({
@@ -233,7 +235,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     )
     if (merged.uvs) {
       const geo = scene.registerTexturedGeometry(merged.vertices, merged.indices, merged.uvs)
-      scene.add(
+      edenWorldMesh = scene.add(
         new Mesh({
           geometry: geo,
           position: [0, 0, 0],
@@ -245,8 +247,12 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       )
     } else {
       const geo = scene.registerGeometry(merged.vertices, merged.indices)
-      scene.add(new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1], outline: 2 }))
+      edenWorldMesh = scene.add(
+        new Mesh({ geometry: geo, position: [0, 0, 0], scale: edenScale, color: [1, 1, 1], outline: 2 }),
+      )
     }
+    // Pre-build BVH for ground raycasting
+    scene.buildBVH(edenWorldMesh.geometry)
   }
 
   for (const em of edenBloom) {
@@ -469,6 +475,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   observeResize()
 
+  // ── Raycast receiver (reused every frame — no allocations) ──────────
+  const rayHit = createRaycastHit()
+  const edenFilter = edenWorldMesh ? ([edenWorldMesh] as readonly Mesh[]) : undefined
+
   // ── Game loop ─────────────────────────────────────────────────────────
   let lastTime = performance.now()
 
@@ -486,6 +496,23 @@ export async function startDemo(canvas: HTMLCanvasElement) {
       if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
       if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
       if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
+
+      // Snap player to ground via downward raycast against Eden world
+      if (edenFilter) {
+        const hit = scene.raycast(
+          player.position[0]!,
+          player.position[1]!,
+          player.position[2]! + 50,
+          0,
+          0,
+          -1,
+          rayHit,
+          edenFilter,
+        )
+        if (hit) {
+          player.position[2] = rayHit.pointZ
+        }
+      }
     }
 
     // Rotate cubes
