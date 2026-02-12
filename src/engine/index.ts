@@ -1,5 +1,7 @@
-export { createScene, Scene, Mesh, Camera } from './scene.ts'
-export type { MeshOptions, ShadowConfig, BloomConfig, OutlineConfig } from './scene.ts'
+export { createScene, Scene, Mesh, Camera, createRaycastHit } from './scene.ts'
+export type { MeshOptions, ShadowConfig, BloomConfig, OutlineConfig, RaycastHit } from './scene.ts'
+export { buildBVH, raycastBVH } from './bvh.ts'
+export type { BVH } from './bvh.ts'
 export { HtmlOverlay, HtmlElement } from './html-overlay.ts'
 export type { HtmlElementOptions } from './html-overlay.ts'
 export { createRenderer } from './gpu.ts'
@@ -58,6 +60,7 @@ export {
   v3Cross,
   v3Lerp,
   m4Identity,
+  m4Invert,
   m4Multiply,
   m4Perspective,
   m4PerspectiveGL,
@@ -67,6 +70,9 @@ export {
   m4ExtractFrustumPlanes,
   m4FromTRS,
   m4FromQuatTRS,
+  m4TransformPoint,
+  m4TransformDirection,
+  m4TransformNormal,
   frustumContainsSphere,
   quatToEulerZXY,
   quatSlerp,

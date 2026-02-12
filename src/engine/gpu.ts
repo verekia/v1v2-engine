@@ -7,6 +7,7 @@ export async function createRenderer(
   canvas: HTMLCanvasElement,
   maxEntities = 1000,
   forceBackend?: BackendType,
+  maxSkinnedEntities?: number,
 ): Promise<IRenderer> {
   // Try WebGPU first (unless forced to WebGL)
   if (forceBackend !== 'webgl' && navigator.gpu) {
@@ -18,7 +19,7 @@ export async function createRenderer(
         if (context) {
           const format = navigator.gpu.getPreferredCanvasFormat()
           context.configure({ device, format, alphaMode: 'premultiplied' })
-          return new Renderer(device, context, format, canvas, maxEntities)
+          return new Renderer(device, context, format, canvas, maxEntities, maxSkinnedEntities)
         }
       }
     } catch {
@@ -29,5 +30,5 @@ export async function createRenderer(
   // Fallback to WebGL
   const gl = canvas.getContext('webgl2', { depth: true })
   if (!gl) throw new Error('Neither WebGPU nor WebGL is supported')
-  return new WebGLRenderer(gl, canvas, maxEntities)
+  return new WebGLRenderer(gl, canvas, maxEntities, maxSkinnedEntities)
 }

@@ -16,7 +16,7 @@ import type { SkinInstance } from './skin.ts'
 const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
-const MAX_SKINNED_ENTITIES = 64
+const DEFAULT_MAX_SKINNED_ENTITIES = 1024
 const SHADOW_MAP_SIZE = 2048
 const MSAA_SAMPLES = 4
 
@@ -198,6 +198,7 @@ export class Renderer implements IRenderer {
   private transparentTexturedPipeline!: GPURenderPipeline
   private textureBGL!: GPUBindGroupLayout
   private maxEntities: number
+  private maxSkinnedEntities: number
 
   drawCalls = 0
 
@@ -214,11 +215,13 @@ export class Renderer implements IRenderer {
     format: GPUTextureFormat,
     canvas: HTMLCanvasElement,
     maxEntities = 1000,
+    maxSkinnedEntities = DEFAULT_MAX_SKINNED_ENTITIES,
   ) {
     this.device = device
     this.context = context
     this.canvasFormat = format
     this.maxEntities = maxEntities
+    this.maxSkinnedEntities = maxSkinnedEntities
     this._tpDist = new Float32Array(maxEntities)
 
     // ── Shader modules ─────────────────────────────────────────────
@@ -758,7 +761,7 @@ export class Renderer implements IRenderer {
     })
     // Joint matrices storage buffer
     this.jointBuffer = device.createBuffer({
-      size: JOINT_SLOT_SIZE * MAX_SKINNED_ENTITIES,
+      size: JOINT_SLOT_SIZE * this.maxSkinnedEntities,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     // Shadow camera: 1 mat4 VP = 128 bytes (same layout as camera: view + proj, but we pack VP into view slot)

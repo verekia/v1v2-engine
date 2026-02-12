@@ -1,7 +1,20 @@
+import { buildBVH, raycastBVH } from './bvh.ts'
 import { createRenderer as createRendererInternal } from './gpu.ts'
-import { m4FromTRS, m4LookAt, m4Multiply, v3Normalize, v3Scale } from './math.ts'
+import {
+  m4FromTRS,
+  m4Invert,
+  m4LookAt,
+  m4Multiply,
+  m4TransformDirection,
+  m4TransformNormal,
+  m4TransformPoint,
+  v3Length,
+  v3Normalize,
+  v3Scale,
+} from './math.ts'
 import { findBoneNodeIndex } from './skin.ts'
 
+import type { BVH } from './bvh.ts'
 import type { BackendType, IRenderer, RenderScene } from './renderer.ts'
 import type { SkinInstance } from './skin.ts'
 
@@ -151,6 +164,36 @@ interface TexReg {
   height: number
 }
 
+// ── Raycast result ─────────────────────────────────────────────────────────
+
+export interface RaycastHit {
+  hit: boolean
+  distance: number
+  pointX: number
+  pointY: number
+  pointZ: number
+  normalX: number
+  normalY: number
+  normalZ: number
+  faceIndex: number
+  mesh: Mesh | null
+}
+
+export function createRaycastHit(): RaycastHit {
+  return {
+    hit: false,
+    distance: Infinity,
+    pointX: 0,
+    pointY: 0,
+    pointZ: 0,
+    normalX: 0,
+    normalY: 0,
+    normalZ: 0,
+    faceIndex: -1,
+    mesh: null,
+  }
+}
+
 // ── Scene ───────────────────────────────────────────────────────────────────
 
 export class Scene {
@@ -167,8 +210,10 @@ export class Scene {
   private _renderer: IRenderer
   private _canvas: HTMLCanvasElement
   private _maxEntities: number
+  private _maxSkinnedEntities: number | undefined
   private _geoRegs = new Map<number, GeoReg>()
   private _texRegs = new Map<number, TexReg>()
+  private _bvhCache = new Map<number, BVH>()
   private _nextGeoId = 0
   private _nextTexId = 0
 
@@ -202,11 +247,21 @@ export class Scene {
   private _lightProj = new Float32Array(16)
   private _lightVP = new Float32Array(16)
 
+  // Raycast scratch buffers
+  private _rayWorldMat = new Float32Array(16)
+  private _rayInvMat = new Float32Array(16)
+  private _rayLocalOrigin = new Float32Array(3)
+  private _rayLocalDir = new Float32Array(3)
+  private _rayFaceOut = new Uint32Array(1)
+  private _rayNormalOut = new Float32Array(3)
+  private _rayWorldNormal = new Float32Array(3)
+
   /** @internal — use createScene() instead */
-  constructor(renderer: IRenderer, canvas: HTMLCanvasElement, maxEntities: number) {
+  constructor(renderer: IRenderer, canvas: HTMLCanvasElement, maxEntities: number, maxSkinnedEntities?: number) {
     this._renderer = renderer
     this._canvas = canvas
     this._maxEntities = maxEntities
+    this._maxSkinnedEntities = maxSkinnedEntities
     this._positions = new Float32Array(maxEntities * 3)
     this._scales = new Float32Array(maxEntities * 3)
     this._worldMatrices = new Float32Array(maxEntities * 16)
@@ -328,11 +383,115 @@ export class Scene {
     this._renderer.resize(w, h)
   }
 
+  // ── Raycasting ─────────────────────────────────────────────────────
+
+  /** Pre-build a BVH for a registered geometry. Optional — raycast() lazily builds on first use. */
+  buildBVH(geometryId: number): void {
+    if (this._bvhCache.has(geometryId)) return
+    const geo = this._geoRegs.get(geometryId)
+    if (!geo) return
+    this._bvhCache.set(geometryId, buildBVH(geo.vertices, geo.indices))
+  }
+
+  /**
+   * Cast a ray and write the closest hit into `result`.
+   * Direction (dx,dy,dz) must be normalized.
+   * Returns true if any hit was found.
+   * Pass `meshFilter` to limit the test to a subset of meshes.
+   */
+  raycast(
+    ox: number,
+    oy: number,
+    oz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    result: RaycastHit,
+    meshFilter?: readonly Mesh[],
+  ): boolean {
+    result.hit = false
+    result.distance = Infinity
+    result.mesh = null
+
+    const meshes = meshFilter ?? this._meshes
+    for (let mi = 0; mi < meshes.length; mi++) {
+      const mesh = meshes[mi]!
+      if (!mesh.visible || mesh.skinned) continue
+
+      // Lazy BVH build
+      let bvh = this._bvhCache.get(mesh.geometry)
+      if (!bvh) {
+        const geo = this._geoRegs.get(mesh.geometry)
+        if (!geo) continue
+        bvh = buildBVH(geo.vertices, geo.indices)
+        this._bvhCache.set(mesh.geometry, bvh)
+      }
+
+      // Compute world matrix & its inverse
+      m4FromTRS(this._rayWorldMat, 0, mesh.position, 0, mesh.rotation, 0, mesh.scale, 0)
+      if (!m4Invert(this._rayInvMat, 0, this._rayWorldMat, 0)) continue
+
+      // Transform ray to local space
+      m4TransformPoint(this._rayLocalOrigin, 0, this._rayInvMat, 0, ox, oy, oz)
+      m4TransformDirection(this._rayLocalDir, 0, this._rayInvMat, 0, dx, dy, dz)
+
+      // The t parameter from the BVH is in local-ray-parameter space.
+      // Since worldDir is unit, world distance = t * |localDir| … but we keep t
+      // in the same parameter space for the entire loop by scaling maxT.
+      const localDirLen = v3Length(this._rayLocalDir, 0)
+      if (localDirLen < 1e-10) continue
+      const maxTLocal = result.distance * localDirLen
+
+      const t = raycastBVH(
+        bvh,
+        this._rayLocalOrigin[0]!,
+        this._rayLocalOrigin[1]!,
+        this._rayLocalOrigin[2]!,
+        this._rayLocalDir[0]!,
+        this._rayLocalDir[1]!,
+        this._rayLocalDir[2]!,
+        maxTLocal,
+        this._rayFaceOut,
+        this._rayNormalOut,
+      )
+
+      if (t >= 0) {
+        const worldDist = t / localDirLen
+        if (worldDist < result.distance) {
+          result.hit = true
+          result.distance = worldDist
+          result.mesh = mesh
+          result.faceIndex = this._rayFaceOut[0]!
+          result.pointX = ox + dx * worldDist
+          result.pointY = oy + dy * worldDist
+          result.pointZ = oz + dz * worldDist
+
+          // Normal: local→world via (M⁻¹)ᵀ
+          m4TransformNormal(
+            this._rayWorldNormal,
+            0,
+            this._rayInvMat,
+            0,
+            this._rayNormalOut[0]!,
+            this._rayNormalOut[1]!,
+            this._rayNormalOut[2]!,
+          )
+          const nlen = v3Length(this._rayWorldNormal, 0) || 1
+          result.normalX = this._rayWorldNormal[0]! / nlen
+          result.normalY = this._rayWorldNormal[1]! / nlen
+          result.normalZ = this._rayWorldNormal[2]! / nlen
+        }
+      }
+    }
+
+    return result.hit
+  }
+
   // ── Backend switching ───────────────────────────────────────────────────
 
   async switchBackend(canvas: HTMLCanvasElement, type: BackendType): Promise<void> {
     this._renderer.destroy()
-    this._renderer = await createRendererInternal(canvas, this._maxEntities, type)
+    this._renderer = await createRendererInternal(canvas, this._maxEntities, type, this._maxSkinnedEntities)
     this._canvas = canvas
 
     // Re-register all geometries on the new renderer
@@ -480,9 +639,9 @@ export class Scene {
 
 export async function createScene(
   canvas: HTMLCanvasElement,
-  opts?: { maxEntities?: number; backend?: BackendType },
+  opts?: { maxEntities?: number; maxSkinnedEntities?: number; backend?: BackendType },
 ): Promise<Scene> {
   const maxEntities = opts?.maxEntities ?? 10_000
-  const renderer = await createRendererInternal(canvas, maxEntities, opts?.backend)
-  return new Scene(renderer, canvas, maxEntities)
+  const renderer = await createRendererInternal(canvas, maxEntities, opts?.backend, opts?.maxSkinnedEntities)
+  return new Scene(renderer, canvas, maxEntities, opts?.maxSkinnedEntities)
 }

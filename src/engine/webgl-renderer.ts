@@ -26,7 +26,7 @@ import type { IRenderer, RenderScene } from './renderer.ts'
 const MODEL_SLOT_SIZE = 256 // match WebGPU alignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 8192 bytes per slot
-const MAX_SKINNED_ENTITIES = 64
+const DEFAULT_MAX_SKINNED_ENTITIES = 1024
 const SHADOW_MAP_SIZE = 2048
 const BLOOM_MIPS = 5
 
@@ -166,6 +166,7 @@ export class WebGLRenderer implements IRenderer {
   private texturedGeometries = new Map<number, TexturedGeometryGL>()
   private glTextures = new Map<number, TextureGL>()
   private maxEntities: number
+  private maxSkinnedEntities: number
 
   drawCalls = 0
 
@@ -177,9 +178,15 @@ export class WebGLRenderer implements IRenderer {
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
-  constructor(gl: WebGL2RenderingContext, _canvas: HTMLCanvasElement, maxEntities = 1000) {
+  constructor(
+    gl: WebGL2RenderingContext,
+    _canvas: HTMLCanvasElement,
+    maxEntities = 1000,
+    maxSkinnedEntities = DEFAULT_MAX_SKINNED_ENTITIES,
+  ) {
     this.gl = gl
     this.maxEntities = maxEntities
+    this.maxSkinnedEntities = maxSkinnedEntities
     this._tpDist = new Float32Array(maxEntities)
 
     // ── Compile programs ─────────────────────────────────────────────
@@ -290,7 +297,7 @@ export class WebGLRenderer implements IRenderer {
 
     this.jointUBO = gl.createBuffer()!
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.jointUBO)
-    gl.bufferData(gl.UNIFORM_BUFFER, JOINT_SLOT_SIZE * MAX_SKINNED_ENTITIES, gl.DYNAMIC_DRAW)
+    gl.bufferData(gl.UNIFORM_BUFFER, JOINT_SLOT_SIZE * this.maxSkinnedEntities, gl.DYNAMIC_DRAW)
 
     this.shadowCameraUBO = gl.createBuffer()!
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.shadowCameraUBO)
