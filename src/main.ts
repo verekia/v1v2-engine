@@ -533,25 +533,46 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     switching = false
   }
 
+  // ── Controls panel (top-right) ──────────────────────────────────────
+  const controls = document.createElement('div')
+  controls.style.cssText =
+    'position:fixed;top:8px;right:8px;color:#fff;font:14px/1.4 monospace;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:4px;display:flex;flex-direction:column;gap:4px;user-select:none'
+  document.body.appendChild(controls)
+
+  function addToggle(id: string, labelText: string, checked: boolean, onChange: (v: boolean) => void) {
+    const row = document.createElement('div')
+    row.style.cssText = 'display:flex;align-items:center;gap:6px'
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.id = id
+    cb.checked = checked
+    cb.style.cssText = 'cursor:pointer'
+    const lbl = document.createElement('label')
+    lbl.htmlFor = id
+    lbl.textContent = labelText
+    lbl.style.cssText = 'cursor:pointer'
+    row.appendChild(cb)
+    row.appendChild(lbl)
+    controls.appendChild(row)
+    cb.addEventListener('change', () => onChange(cb.checked))
+    return cb
+  }
+
+  // Bloom toggle
+  addToggle('bloom-toggle', 'Bloom', scene.bloom.enabled, v => {
+    scene.bloom.enabled = v
+  })
+
+  // Outline toggle
+  addToggle('outline-toggle', 'Outline', scene.outline.enabled, v => {
+    scene.outline.enabled = v
+  })
+
+  // Backend toggle (WebGPU only)
   if (webgpuAvailable) {
-    const toggle = document.createElement('div')
-    toggle.style.cssText =
-      'position:fixed;top:8px;right:8px;color:#fff;font:14px/1.4 monospace;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:4px;display:flex;align-items:center;gap:6px;user-select:none'
-    const checkbox = document.createElement('input')
-    checkbox.type = 'checkbox'
-    checkbox.id = 'backend-toggle'
-    checkbox.checked = scene.backendType === 'webgpu'
-    checkbox.style.cssText = 'cursor:pointer'
-    const label = document.createElement('label')
-    label.htmlFor = 'backend-toggle'
-    label.textContent = 'WebGPU'
-    label.style.cssText = 'cursor:pointer'
-    toggle.appendChild(checkbox)
-    toggle.appendChild(label)
-    document.body.appendChild(toggle)
-    checkbox.addEventListener('change', async () => {
+    const checkbox = addToggle('backend-toggle', 'WebGPU', scene.backendType === 'webgpu', async v => {
       checkbox.disabled = true
-      const target: BackendType = checkbox.checked ? 'webgpu' : 'webgl'
+      const target: BackendType = v ? 'webgpu' : 'webgl'
       try {
         await switchBackend(target)
         localStorage.setItem('renderer-backend', target)
