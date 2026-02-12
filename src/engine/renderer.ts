@@ -206,6 +206,13 @@ export class Renderer implements IRenderer {
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24) // 6 planes × 4 floats
   private lightData = new Float32Array(32) // 128 bytes for lighting UBO
+  private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+  private shadowCamData = new Float32Array(32)
+  private compositeParams = new Float32Array(12) // 48 bytes
+  private upsampleData = new Float32Array(4)
+  private _mipW = new Float64Array(Renderer.BLOOM_MIPS)
+  private _mipH = new Float64Array(Renderer.BLOOM_MIPS)
+  private _skinnedSlotMap = new Map<number, number>()
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -1329,7 +1336,7 @@ export class Renderer implements IRenderer {
     const outlineDF = scene.outlineDistanceFactor ?? 0
 
     // Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
-    const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+    const modelSlot = this.modelSlot
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
 
@@ -1360,7 +1367,8 @@ export class Renderer implements IRenderer {
 
     // Upload joint matrices for skinned entities
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>() // entity → slot
+    const skinnedSlotMap = this._skinnedSlotMap
+    skinnedSlotMap.clear()
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
       const instId = scene.skinInstanceIds[i]!
@@ -1386,9 +1394,10 @@ export class Renderer implements IRenderer {
       // Upload shadow camera (light VP into view slot, identity into proj slot)
       // Shadow depth shaders use camera.projection * camera.view * worldPos
       // We store identity in projection and lightVP in view, so result = I * lightVP * worldPos = lightVP * worldPos
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
-      // Identity matrix for projection
+      // Identity matrix for projection — clear and set diagonal
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1
@@ -1508,14 +1517,14 @@ export class Renderer implements IRenderer {
       const radius = scene.bloomRadius ?? 1
       let uw = canvasTex.width,
         uh = canvasTex.height
-      // Compute mip sizes
-      const mipW: number[] = [],
-        mipH: number[] = []
+      // Compute mip sizes (reuse scratch arrays)
+      const mipW = this._mipW
+      const mipH = this._mipH
       for (let i = 0; i < MIPS; i++) {
         uw = Math.max(1, (uw / 2) | 0)
         uh = Math.max(1, (uh / 2) | 0)
-        mipW.push(uw)
-        mipH.push(uh)
+        mipW[i] = uw
+        mipH[i] = uh
       }
       for (let i = 0; i < MIPS - 1; i++) {
         const srcIdx = MIPS - 1 - i // source mip (lower res)
@@ -1524,8 +1533,12 @@ export class Renderer implements IRenderer {
           destH = mipH[dstIdx]!
         const srcW = mipW[srcIdx]!,
           srcH = mipH[srcIdx]!
-        const data = new Float32Array([1 / destW, 1 / destH, radius / srcW, radius / srcH])
-        device.queue.writeBuffer(this.bloomUpsampleParams[i]!, 0, data.buffer as ArrayBuffer, 0, 16)
+        const data = this.upsampleData
+        data[0] = 1 / destW
+        data[1] = 1 / destH
+        data[2] = radius / srcW
+        data[3] = radius / srcH
+        device.queue.writeBuffer(this.bloomUpsampleParams[i]!, 0, data.buffer as ArrayBuffer, data.byteOffset, 16)
       }
 
       // Upsample chain: mip[N-1] → mip[N-2] → ... → mip[0] (additive blend)
@@ -1541,7 +1554,7 @@ export class Renderer implements IRenderer {
       }
 
       // Composite: sceneTexture + mip[0] (accumulated bloom) + outline → canvas
-      const compositeParams = new Float32Array(12) // 48 bytes
+      const compositeParams = this.compositeParams
       compositeParams[0] = scene.bloomIntensity ?? 1
       compositeParams[1] = scene.bloomThreshold ?? 0
       compositeParams[2] = scene.outlineEnabled ? (scene.outlineThickness ?? 3) : 0
@@ -1554,7 +1567,13 @@ export class Renderer implements IRenderer {
       compositeParams[9] = 1 / canvasTex.height
       compositeParams[10] = 0 // pad
       compositeParams[11] = 0 // pad
-      device.queue.writeBuffer(this.bloomCompositeParamsBuffer, 0, compositeParams.buffer as ArrayBuffer, 0, 48)
+      device.queue.writeBuffer(
+        this.bloomCompositeParamsBuffer,
+        0,
+        compositeParams.buffer as ArrayBuffer,
+        compositeParams.byteOffset,
+        48,
+      )
       const compositePass = encoder.beginRenderPass({
         colorAttachments: [
           {

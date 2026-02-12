@@ -239,6 +239,7 @@ export class Scene {
 
   // Bone attachment scratch buffers
   private _boneScratch = new Float32Array(16)
+  private _meshIndexMap = new Map<Mesh, number>()
 
   // Shadow scratch buffers
   private _lightDirNorm = new Float32Array(3)
@@ -246,6 +247,9 @@ export class Scene {
   private _lightView = new Float32Array(16)
   private _lightProj = new Float32Array(16)
   private _lightVP = new Float32Array(16)
+
+  // Cached RenderScene (avoids per-frame object literal allocation)
+  private _renderScene: RenderScene | null = null
 
   // Raycast scratch buffers
   private _rayWorldMat = new Float32Array(16)
@@ -529,6 +533,12 @@ export class Scene {
 
     for (let i = 0; i < count; i++) {
       const m = meshes[i]!
+
+      if (!m.visible) {
+        this._renderMask[i] = 0
+        continue
+      }
+
       const i3 = i * 3
 
       this._positions[i3] = m.position[0]!
@@ -548,7 +558,7 @@ export class Scene {
       this._geometryIds[i] = m.geometry
       this._skinInstanceIds[i] = m.skinInstanceId
 
-      this._renderMask[i] = m.visible ? 1 : 0
+      this._renderMask[i] = 1
       this._skinnedMask[i] = m.skinned ? 1 : 0
       this._unlitMask[i] = m.unlit ? 1 : 0
       this._texturedMask[i] = m.aoMap >= 0 ? 1 : 0
@@ -558,11 +568,16 @@ export class Scene {
     }
 
     // Bone attachment pass: override world matrices for bone-attached meshes
+    // Build mesh→index map once to avoid O(n) indexOf per bone-attached mesh
+    const meshIndexMap = this._meshIndexMap
+    meshIndexMap.clear()
+    for (let i = 0; i < count; i++) meshIndexMap.set(meshes[i]!, i)
+
     for (let i = 0; i < count; i++) {
       const m = meshes[i]!
       if (!m.boneParent || !m.boneSkinInstance || m.boneNodeIndex < 0) continue
-      const parentIdx = this._meshes.indexOf(m.boneParent)
-      if (parentIdx < 0) continue
+      const parentIdx = meshIndexMap.get(m.boneParent)
+      if (parentIdx === undefined) continue
       const boneGlobal = m.boneSkinInstance.globalMatrices
       const boneOff = m.boneNodeIndex * 16
       // temp = boneGlobalMatrix × meshLocalTRS
@@ -576,39 +591,55 @@ export class Scene {
       this._positions[i * 3 + 2] = this._worldMatrices[wo + 14]!
     }
 
-    // Build RenderScene
-    const rs: RenderScene = {
-      cameraView: this._viewMatrix,
-      cameraProj: this._projMatrix,
-      lightDirection: this.lightDirection,
-      lightDirColor: this.lightDirColor,
-      lightAmbientColor: this.lightAmbientColor,
-      entityCount: count,
-      renderMask: this._renderMask,
-      skinnedMask: this._skinnedMask,
-      unlitMask: this._unlitMask,
-      positions: this._positions,
-      scales: this._scales,
-      worldMatrices: this._worldMatrices,
-      colors: this._colors,
-      alphas: this._alphas,
-      geometryIds: this._geometryIds,
-      skinInstanceIds: this._skinInstanceIds,
-      skinInstances: this.skinInstances,
-      texturedMask: this._texturedMask,
-      aoMapIds: this._aoMapIds,
-      bloomEnabled: this.bloom.enabled,
-      bloomIntensity: this.bloom.intensity,
-      bloomThreshold: this.bloom.threshold,
-      bloomRadius: this.bloom.radius,
-      bloomWhiten: this.bloom.whiten,
-      bloomValues: this._bloomValues,
-      outlineEnabled: this.outline.enabled,
-      outlineThickness: this.outline.thickness,
-      outlineColor: this.outline.color,
-      outlineDistanceFactor: this.outline.distanceFactor,
-      outlineMask: this._outlineMask,
+    // Build RenderScene (reuse cached object to avoid per-frame allocation)
+    let rs = this._renderScene
+    if (!rs) {
+      rs = {
+        cameraView: this._viewMatrix,
+        cameraProj: this._projMatrix,
+        lightDirection: this.lightDirection,
+        lightDirColor: this.lightDirColor,
+        lightAmbientColor: this.lightAmbientColor,
+        entityCount: count,
+        renderMask: this._renderMask,
+        skinnedMask: this._skinnedMask,
+        unlitMask: this._unlitMask,
+        positions: this._positions,
+        scales: this._scales,
+        worldMatrices: this._worldMatrices,
+        colors: this._colors,
+        alphas: this._alphas,
+        geometryIds: this._geometryIds,
+        skinInstanceIds: this._skinInstanceIds,
+        skinInstances: this.skinInstances,
+        texturedMask: this._texturedMask,
+        aoMapIds: this._aoMapIds,
+        bloomEnabled: this.bloom.enabled,
+        bloomIntensity: this.bloom.intensity,
+        bloomThreshold: this.bloom.threshold,
+        bloomRadius: this.bloom.radius,
+        bloomWhiten: this.bloom.whiten,
+        bloomValues: this._bloomValues,
+        outlineEnabled: this.outline.enabled,
+        outlineThickness: this.outline.thickness,
+        outlineColor: this.outline.color,
+        outlineDistanceFactor: this.outline.distanceFactor,
+        outlineMask: this._outlineMask,
+      }
+      this._renderScene = rs
     }
+    // Update mutable fields
+    rs.entityCount = count
+    rs.skinInstances = this.skinInstances
+    rs.bloomEnabled = this.bloom.enabled
+    rs.bloomIntensity = this.bloom.intensity
+    rs.bloomThreshold = this.bloom.threshold
+    rs.bloomRadius = this.bloom.radius
+    rs.bloomWhiten = this.bloom.whiten
+    rs.outlineEnabled = this.outline.enabled
+    rs.outlineThickness = this.outline.thickness
+    rs.outlineColor = this.outline.color
+    rs.outlineDistanceFactor = this.outline.distanceFactor
 
     // Compute shadow VP if enabled
     if (this.shadow.enabled) {

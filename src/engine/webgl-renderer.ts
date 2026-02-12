@@ -175,6 +175,10 @@ export class WebGLRenderer implements IRenderer {
   private frustumPlanes = new Float32Array(24)
   private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4)
   private lightData = new Float32Array(32) // 128 bytes
+  private shadowCamData = new Float32Array(32)
+  private _mipW = new Float64Array(BLOOM_MIPS)
+  private _mipH = new Float64Array(BLOOM_MIPS)
+  private _skinnedSlotMap = new Map<number, number>()
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -764,7 +768,8 @@ export class WebGLRenderer implements IRenderer {
 
     // ── Upload joint matrices ────────────────────────────────────────
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>()
+    const skinnedSlotMap = this._skinnedSlotMap
+    skinnedSlotMap.clear()
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.jointUBO)
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
@@ -783,8 +788,9 @@ export class WebGLRenderer implements IRenderer {
     // ── Shadow depth pass ─────────────────────────────────────────────
     if (hasShadow) {
       // Upload shadow camera UBO (light VP as view, identity as projection)
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1
@@ -890,16 +896,16 @@ export class WebGLRenderer implements IRenderer {
       gl.useProgram(this.bloomUpsampleProgram)
       const radius = scene.bloomRadius ?? 1
 
-      // Compute mip sizes
-      const mipW: number[] = [],
-        mipH: number[] = []
+      // Compute mip sizes (reuse scratch arrays)
+      const mipW = this._mipW
+      const mipH = this._mipH
       let tw = w,
         th = h
       for (let i = 0; i < BLOOM_MIPS; i++) {
         tw = Math.max(1, (tw / 2) | 0)
         th = Math.max(1, (th / 2) | 0)
-        mipW.push(tw)
-        mipH.push(th)
+        mipW[i] = tw
+        mipH[i] = th
       }
 
       for (let i = 0; i < BLOOM_MIPS - 1; i++) {
