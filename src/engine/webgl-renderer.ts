@@ -723,15 +723,22 @@ export class WebGLRenderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
-    // Extract camera eye from view matrix for distance calculations
-    const vm0 = scene.cameraView
-    const vtx = vm0[12]!,
-      vty = vm0[13]!,
-      vtz = vm0[14]!
-    const eyeX = -(vm0[0]! * vtx + vm0[1]! * vty + vm0[2]! * vtz)
-    const eyeY = -(vm0[4]! * vtx + vm0[5]! * vty + vm0[6]! * vtz)
-    const eyeZ = -(vm0[8]! * vtx + vm0[9]! * vty + vm0[10]! * vtz)
-    const outlineDF = scene.outlineDistanceFactor ?? 0
+    const hasPostprocessing = !!scene.bloomEnabled || !!scene.outlineEnabled
+    // Extract camera eye + outline distance factor only when post-processing is active
+    let eyeX = 0,
+      eyeY = 0,
+      eyeZ = 0,
+      outlineDF = 0
+    if (hasPostprocessing) {
+      const vm0 = scene.cameraView
+      const vtx = vm0[12]!,
+        vty = vm0[13]!,
+        vtz = vm0[14]!
+      eyeX = -(vm0[0]! * vtx + vm0[1]! * vty + vm0[2]! * vtz)
+      eyeY = -(vm0[4]! * vtx + vm0[5]! * vty + vm0[6]! * vtz)
+      eyeZ = -(vm0[8]! * vtx + vm0[9]! * vty + vm0[10]! * vtz)
+      outlineDF = scene.outlineDistanceFactor ?? 0
+    }
 
     // ── Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
     const modelSlot = this.modelSlot
@@ -746,21 +753,28 @@ export class WebGLRenderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
-      // bloom (float at offset 20) + bloomWhiten (float at offset 21) + outline (float at offset 22) + outlineScale (float at offset 23)
-      const bloomVal = scene.bloomValues?.[i] ?? 0
-      modelSlot[20] = bloomVal
-      modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
-      const outlineGroup = scene.outlineMask?.[i] ?? 0
-      const isOutlined = outlineGroup > 0
-      modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
-      if (isOutlined && outlineDF > 0) {
-        const dx = scene.positions[i * 3]! - eyeX
-        const dy = scene.positions[i * 3 + 1]! - eyeY
-        const dz = scene.positions[i * 3 + 2]! - eyeZ
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-        modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+      // bloom + outline (slots 20-23) — skip computation when both features disabled
+      if (hasPostprocessing) {
+        const bloomVal = scene.bloomValues?.[i] ?? 0
+        modelSlot[20] = bloomVal
+        modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+        const outlineGroup = scene.outlineMask?.[i] ?? 0
+        const isOutlined = outlineGroup > 0
+        modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
+        if (isOutlined && outlineDF > 0) {
+          const dx = scene.positions[i * 3]! - eyeX
+          const dy = scene.positions[i * 3 + 1]! - eyeY
+          const dz = scene.positions[i * 3 + 2]! - eyeZ
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+          modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+        } else {
+          modelSlot[23] = isOutlined ? 1.0 : 0.0
+        }
       } else {
-        modelSlot[23] = isOutlined ? 1.0 : 0.0
+        modelSlot[20] = 0
+        modelSlot[21] = 0
+        modelSlot[22] = 0
+        modelSlot[23] = 0
       }
 
       gl.bufferSubData(gl.UNIFORM_BUFFER, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
