@@ -17,7 +17,8 @@ const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
 const DEFAULT_MAX_SKINNED_ENTITIES = 1024
-const SHADOW_MAP_SIZE = 2048
+const SHADOW_CASCADE_SIZE = 1024
+const SHADOW_ATLAS_SIZE = SHADOW_CASCADE_SIZE * 2 // 2×2 grid of cascades
 const MSAA_SAMPLES = 4
 
 export type BackendType = 'webgpu' | 'webgl'
@@ -76,8 +77,9 @@ export interface RenderScene {
   skinInstances: SkinInstance[]
   texturedMask: Uint8Array
   aoMapIds: Int16Array
-  shadowLightViewProj?: Float32Array
-  shadowMapSize?: number
+  shadowCascadeVPs?: Float32Array
+  shadowCascadeSplits?: Float32Array
+  shadowCascadeCount?: number
   shadowBias?: number
   shadowNormalBias?: number
   bloomEnabled?: boolean
@@ -205,7 +207,7 @@ export class Renderer implements IRenderer {
   // Scratch buffers (no per-frame allocation)
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24) // 6 planes × 4 floats
-  private lightData = new Float32Array(32) // 128 bytes for lighting UBO
+  private lightData = new Float32Array(84) // 336 bytes for lighting UBO (with 4 cascade VPs)
   private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
   private shadowCamData = new Float32Array(32)
   private compositeParams = new Float32Array(12) // 48 bytes
@@ -240,7 +242,9 @@ export class Renderer implements IRenderer {
 
     // ── Bind group layouts ────────────────────────────────────────────
     const cameraBGL = device.createBindGroupLayout({
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }],
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
     })
     this.modelBGL = device.createBindGroupLayout({
       entries: [
@@ -738,7 +742,7 @@ export class Renderer implements IRenderer {
 
     // ── Shadow map texture ────────────────────────────────────────────
     this.shadowMapTexture = device.createTexture({
-      size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+      size: [SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE],
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     })
@@ -761,9 +765,9 @@ export class Renderer implements IRenderer {
       size: MODEL_SLOT_SIZE * maxEntities,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    // Lighting: 128 bytes (direction + dirColor + ambient + lightVP + shadowParams)
+    // Lighting: 336 bytes (direction + dirColor + ambient + 4×lightVP + shadowParams + cascadeSplits)
     this.lightingBuffer = device.createBuffer({
-      size: 128,
+      size: 336,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     // Joint matrices storage buffer
@@ -1290,7 +1294,7 @@ export class Renderer implements IRenderer {
       64,
     )
 
-    // Upload lighting (128 bytes)
+    // Upload lighting (336 bytes)
     const lightData = this.lightData
     lightData[0] = scene.lightDirection[0]!
     lightData[1] = scene.lightDirection[1]!
@@ -1304,20 +1308,31 @@ export class Renderer implements IRenderer {
     lightData[9] = scene.lightAmbientColor[1]!
     lightData[10] = scene.lightAmbientColor[2]!
     lightData[11] = 0
-    // lightVP (mat4x4f at offset 12 floats = 48 bytes)
-    const hasShadow = !!scene.shadowLightViewProj
+    // lightVP[4] (4 × mat4x4f at offset 12 floats = 48 bytes, 64 floats total)
+    const cascadeCount = scene.shadowCascadeCount ?? 0
+    const hasShadow = cascadeCount > 0
     if (hasShadow) {
-      for (let i = 0; i < 16; i++) lightData[12 + i] = scene.shadowLightViewProj![i]!
+      for (let i = 0; i < cascadeCount * 16; i++) lightData[12 + i] = scene.shadowCascadeVPs![i]!
+      // Zero remaining cascade slots
+      for (let i = cascadeCount * 16; i < 64; i++) lightData[12 + i] = 0
     } else {
-      for (let i = 0; i < 16; i++) lightData[12 + i] = 0
+      for (let i = 0; i < 64; i++) lightData[12 + i] = 0
     }
-    // shadowParams (vec4f at offset 28 floats = 112 bytes)
-    const mapSize = scene.shadowMapSize ?? SHADOW_MAP_SIZE
-    lightData[28] = scene.shadowBias ?? 0.001 // bias
-    lightData[29] = scene.shadowNormalBias ?? 0.05 // normal offset bias
-    lightData[30] = 1.0 / mapSize // texelSize
-    lightData[31] = hasShadow ? 1.0 : 0.0 // enabled
-    device.queue.writeBuffer(this.lightingBuffer, 0, lightData.buffer as ArrayBuffer, lightData.byteOffset, 128)
+    // shadowParams (vec4f at offset 76 floats = 304 bytes)
+    lightData[76] = scene.shadowBias ?? 0.001 // bias
+    lightData[77] = scene.shadowNormalBias ?? 0.05 // normal offset bias
+    lightData[78] = 1.0 / SHADOW_CASCADE_SIZE // texelSize (per cascade tile)
+    lightData[79] = hasShadow ? 1.0 : 0.0 // enabled
+    // cascadeSplits (vec4f at offset 80 floats = 320 bytes)
+    if (hasShadow) {
+      for (let i = 0; i < 4; i++) lightData[80 + i] = scene.shadowCascadeSplits?.[i] ?? 0
+    } else {
+      lightData[80] = 0
+      lightData[81] = 0
+      lightData[82] = 0
+      lightData[83] = 0
+    }
+    device.queue.writeBuffer(this.lightingBuffer, 0, lightData.buffer as ArrayBuffer, lightData.byteOffset, 336)
 
     // ── Frustum culling setup ───────────────────────────────────────────
     // VP = projection * view
@@ -1404,21 +1419,8 @@ export class Renderer implements IRenderer {
 
     const encoder = device.createCommandEncoder()
 
-    // ── Shadow depth pass ──────────────────────────────────────────────
+    // ── Shadow depth pass (cascaded) ──────────────────────────────────
     if (hasShadow) {
-      // Upload shadow camera (light VP into view slot, identity into proj slot)
-      // Shadow depth shaders use camera.projection * camera.view * worldPos
-      // We store identity in projection and lightVP in view, so result = I * lightVP * worldPos = lightVP * worldPos
-      const shadowCamData = this.shadowCamData
-      for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
-      // Identity matrix for projection — clear and set diagonal
-      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
-      shadowCamData[16] = 1
-      shadowCamData[21] = 1
-      shadowCamData[26] = 1
-      shadowCamData[31] = 1
-      device.queue.writeBuffer(this.shadowCameraBuffer, 0, shadowCamData.buffer as ArrayBuffer, 0, 128)
-
       const shadowPass = encoder.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: {
@@ -1429,43 +1431,73 @@ export class Renderer implements IRenderer {
         },
       })
 
-      // Static shadow casters
-      shadowPass.setPipeline(this.shadowPipeline)
-      shadowPass.setBindGroup(0, this.shadowCameraBG)
+      for (let c = 0; c < cascadeCount; c++) {
+        // Set viewport to the cascade's quadrant in the 2×2 atlas
+        const col = c % 2
+        const row = (c / 2) | 0
+        shadowPass.setViewport(
+          col * SHADOW_CASCADE_SIZE,
+          row * SHADOW_CASCADE_SIZE,
+          SHADOW_CASCADE_SIZE,
+          SHADOW_CASCADE_SIZE,
+          0,
+          1,
+        )
+        shadowPass.setScissorRect(
+          col * SHADOW_CASCADE_SIZE,
+          row * SHADOW_CASCADE_SIZE,
+          SHADOW_CASCADE_SIZE,
+          SHADOW_CASCADE_SIZE,
+        )
 
-      for (let i = 0; i < scene.entityCount; i++) {
-        if (!scene.renderMask[i]) continue
-        if (scene.skinnedMask[i]) continue
-        if (scene.unlitMask[i]) continue
-        if (scene.alphas[i]! < 1.0) continue
-        const geo = this.geometries.get(scene.geometryIds[i]!)
-        if (!geo) continue
+        // Upload shadow camera: cascade VP in view slot, identity in proj slot
+        const shadowCamData = this.shadowCamData
+        for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowCascadeVPs![c * 16 + i]!
+        for (let i = 16; i < 32; i++) shadowCamData[i] = 0
+        shadowCamData[16] = 1
+        shadowCamData[21] = 1
+        shadowCamData[26] = 1
+        shadowCamData[31] = 1
+        device.queue.writeBuffer(this.shadowCameraBuffer, 0, shadowCamData.buffer as ArrayBuffer, 0, 128)
 
-        shadowPass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
-        shadowPass.setVertexBuffer(0, geo.vertexBuffer)
-        shadowPass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
-        shadowPass.drawIndexed(geo.indexCount)
-      }
-
-      // Skinned shadow casters
-      if (skinnedSlotMap.size > 0) {
-        shadowPass.setPipeline(this.shadowSkinnedPipeline)
+        // Static shadow casters
+        shadowPass.setPipeline(this.shadowPipeline)
         shadowPass.setBindGroup(0, this.shadowCameraBG)
 
         for (let i = 0; i < scene.entityCount; i++) {
-          if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+          if (!scene.renderMask[i]) continue
+          if (scene.skinnedMask[i]) continue
+          if (scene.unlitMask[i]) continue
           if (scene.alphas[i]! < 1.0) continue
-          const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
+          const geo = this.geometries.get(scene.geometryIds[i]!)
           if (!geo) continue
-          const slot = skinnedSlotMap.get(i)
-          if (slot === undefined) continue
 
           shadowPass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
-          shadowPass.setBindGroup(2, this.jointBG, [slot * JOINT_SLOT_SIZE])
           shadowPass.setVertexBuffer(0, geo.vertexBuffer)
-          shadowPass.setVertexBuffer(1, geo.skinBuffer)
           shadowPass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
           shadowPass.drawIndexed(geo.indexCount)
+        }
+
+        // Skinned shadow casters
+        if (skinnedSlotMap.size > 0) {
+          shadowPass.setPipeline(this.shadowSkinnedPipeline)
+          shadowPass.setBindGroup(0, this.shadowCameraBG)
+
+          for (let i = 0; i < scene.entityCount; i++) {
+            if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+            if (scene.alphas[i]! < 1.0) continue
+            const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
+            if (!geo) continue
+            const slot = skinnedSlotMap.get(i)
+            if (slot === undefined) continue
+
+            shadowPass.setBindGroup(1, this.modelBG, [i * MODEL_SLOT_SIZE])
+            shadowPass.setBindGroup(2, this.jointBG, [slot * JOINT_SLOT_SIZE])
+            shadowPass.setVertexBuffer(0, geo.vertexBuffer)
+            shadowPass.setVertexBuffer(1, geo.skinBuffer)
+            shadowPass.setIndexBuffer(geo.indexBuffer, geo.indexFormat)
+            shadowPass.drawIndexed(geo.indexCount)
+          }
         }
       }
 

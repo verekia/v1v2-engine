@@ -27,7 +27,8 @@ const MODEL_SLOT_SIZE = 256 // match WebGPU alignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 8192 bytes per slot
 const DEFAULT_MAX_SKINNED_ENTITIES = 1024
-const SHADOW_MAP_SIZE = 2048
+const SHADOW_CASCADE_SIZE = 1024
+const SHADOW_ATLAS_SIZE = SHADOW_CASCADE_SIZE * 2 // 2×2 grid of cascades
 const BLOOM_MIPS = 5
 
 // UBO binding points
@@ -174,7 +175,7 @@ export class WebGLRenderer implements IRenderer {
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24)
   private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4)
-  private lightData = new Float32Array(32) // 128 bytes
+  private lightData = new Float32Array(84) // 336 bytes for lighting UBO (with 4 cascade VPs)
   private shadowCamData = new Float32Array(32)
   private _mipW = new Float64Array(BLOOM_MIPS)
   private _mipH = new Float64Array(BLOOM_MIPS)
@@ -297,7 +298,7 @@ export class WebGLRenderer implements IRenderer {
 
     this.lightingUBO = gl.createBuffer()!
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightingUBO)
-    gl.bufferData(gl.UNIFORM_BUFFER, 128, gl.DYNAMIC_DRAW)
+    gl.bufferData(gl.UNIFORM_BUFFER, 336, gl.DYNAMIC_DRAW)
 
     this.jointUBO = gl.createBuffer()!
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.jointUBO)
@@ -312,7 +313,7 @@ export class WebGLRenderer implements IRenderer {
     // ── Shadow map texture + FBO ─────────────────────────────────────
     this.shadowTexture = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT32F, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT32F, SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -690,7 +691,7 @@ export class WebGLRenderer implements IRenderer {
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, scene.cameraView, 0, 16)
     gl.bufferSubData(gl.UNIFORM_BUFFER, 64, scene.cameraProj, 0, 16)
 
-    // ── Upload lighting UBO (128 bytes) ──────────────────────────────
+    // ── Upload lighting UBO (336 bytes) ──────────────────────────────
     const lightData = this.lightData
     lightData[0] = scene.lightDirection[0]!
     lightData[1] = scene.lightDirection[1]!
@@ -704,17 +705,29 @@ export class WebGLRenderer implements IRenderer {
     lightData[9] = scene.lightAmbientColor[1]!
     lightData[10] = scene.lightAmbientColor[2]!
     lightData[11] = 0
-    const hasShadow = !!scene.shadowLightViewProj
+    // lightVP[4] (4 × mat4 at offset 12 floats = 48 bytes, 64 floats total)
+    const cascadeCount = scene.shadowCascadeCount ?? 0
+    const hasShadow = cascadeCount > 0
     if (hasShadow) {
-      for (let i = 0; i < 16; i++) lightData[12 + i] = scene.shadowLightViewProj![i]!
+      for (let i = 0; i < cascadeCount * 16; i++) lightData[12 + i] = scene.shadowCascadeVPs![i]!
+      for (let i = cascadeCount * 16; i < 64; i++) lightData[12 + i] = 0
     } else {
-      for (let i = 0; i < 16; i++) lightData[12 + i] = 0
+      for (let i = 0; i < 64; i++) lightData[12 + i] = 0
     }
-    const mapSize = scene.shadowMapSize ?? SHADOW_MAP_SIZE
-    lightData[28] = scene.shadowBias ?? 0.001
-    lightData[29] = scene.shadowNormalBias ?? 0.05 // normal offset bias
-    lightData[30] = 1.0 / mapSize
-    lightData[31] = hasShadow ? 1.0 : 0.0
+    // shadowParams (vec4 at offset 76 floats = 304 bytes)
+    lightData[76] = scene.shadowBias ?? 0.001
+    lightData[77] = scene.shadowNormalBias ?? 0.05
+    lightData[78] = 1.0 / SHADOW_CASCADE_SIZE
+    lightData[79] = hasShadow ? 1.0 : 0.0
+    // cascadeSplits (vec4 at offset 80 floats = 320 bytes)
+    if (hasShadow) {
+      for (let i = 0; i < 4; i++) lightData[80 + i] = scene.shadowCascadeSplits?.[i] ?? 0
+    } else {
+      lightData[80] = 0
+      lightData[81] = 0
+      lightData[82] = 0
+      lightData[83] = 0
+    }
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightingUBO)
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, lightData)
 
@@ -799,61 +812,71 @@ export class WebGLRenderer implements IRenderer {
 
     gl.bindBuffer(gl.UNIFORM_BUFFER, null)
 
-    // ── Shadow depth pass ─────────────────────────────────────────────
+    // ── Shadow depth pass (cascaded) ──────────────────────────────────
     if (hasShadow) {
-      // Upload shadow camera UBO (light VP as view, identity as projection)
-      const shadowCamData = this.shadowCamData
-      for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
-      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
-      shadowCamData[16] = 1
-      shadowCamData[21] = 1
-      shadowCamData[26] = 1
-      shadowCamData[31] = 1
-      gl.bindBuffer(gl.UNIFORM_BUFFER, this.shadowCameraUBO)
-      gl.bufferSubData(gl.UNIFORM_BUFFER, 0, shadowCamData)
-      gl.bindBuffer(gl.UNIFORM_BUFFER, null)
-
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFBO)
-      gl.viewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
+      gl.viewport(0, 0, SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE)
       gl.clear(gl.DEPTH_BUFFER_BIT)
       gl.enable(gl.POLYGON_OFFSET_FILL)
       gl.polygonOffset(1.0, 1.0)
 
       gl.bindBufferBase(gl.UNIFORM_BUFFER, UBO_SHADOW_CAMERA, this.shadowCameraUBO)
 
-      // Static shadow casters
-      gl.useProgram(this.shadowDepthProgram)
-      for (let i = 0; i < scene.entityCount; i++) {
-        if (!scene.renderMask[i]) continue
-        if (scene.skinnedMask[i]) continue
-        if (scene.unlitMask[i]) continue
-        if (scene.alphas[i]! < 1.0) continue
-        const geo = this.geometries.get(scene.geometryIds[i]!)
-        if (!geo) continue
+      for (let c = 0; c < cascadeCount; c++) {
+        // Set viewport to the cascade's quadrant in the 2×2 atlas
+        const col = c % 2
+        const row = (c / 2) | 0
+        gl.viewport(col * SHADOW_CASCADE_SIZE, row * SHADOW_CASCADE_SIZE, SHADOW_CASCADE_SIZE, SHADOW_CASCADE_SIZE)
+        gl.scissor(col * SHADOW_CASCADE_SIZE, row * SHADOW_CASCADE_SIZE, SHADOW_CASCADE_SIZE, SHADOW_CASCADE_SIZE)
+        gl.enable(gl.SCISSOR_TEST)
 
-        gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
-        gl.bindVertexArray(geo.vao)
-        gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
-      }
+        // Upload shadow camera UBO: cascade VP in view slot, identity in proj slot
+        const shadowCamData = this.shadowCamData
+        for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowCascadeVPs![c * 16 + i]!
+        for (let i = 16; i < 32; i++) shadowCamData[i] = 0
+        shadowCamData[16] = 1
+        shadowCamData[21] = 1
+        shadowCamData[26] = 1
+        shadowCamData[31] = 1
+        gl.bindBuffer(gl.UNIFORM_BUFFER, this.shadowCameraUBO)
+        gl.bufferSubData(gl.UNIFORM_BUFFER, 0, shadowCamData)
+        gl.bindBuffer(gl.UNIFORM_BUFFER, null)
 
-      // Skinned shadow casters
-      if (skinnedSlotMap.size > 0) {
-        gl.useProgram(this.shadowSkinnedDepthProgram)
+        // Static shadow casters
+        gl.useProgram(this.shadowDepthProgram)
         for (let i = 0; i < scene.entityCount; i++) {
-          if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+          if (!scene.renderMask[i]) continue
+          if (scene.skinnedMask[i]) continue
+          if (scene.unlitMask[i]) continue
           if (scene.alphas[i]! < 1.0) continue
-          const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
+          const geo = this.geometries.get(scene.geometryIds[i]!)
           if (!geo) continue
-          const slot = skinnedSlotMap.get(i)
-          if (slot === undefined) continue
 
           gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
-          gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_JOINTS, this.jointUBO, slot * JOINT_SLOT_SIZE, JOINT_SLOT_SIZE)
           gl.bindVertexArray(geo.vao)
           gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
         }
+
+        // Skinned shadow casters
+        if (skinnedSlotMap.size > 0) {
+          gl.useProgram(this.shadowSkinnedDepthProgram)
+          for (let i = 0; i < scene.entityCount; i++) {
+            if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
+            if (scene.alphas[i]! < 1.0) continue
+            const geo = this.skinnedGeometries.get(scene.geometryIds[i]!)
+            if (!geo) continue
+            const slot = skinnedSlotMap.get(i)
+            if (slot === undefined) continue
+
+            gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_MODEL, this.modelUBO, i * MODEL_SLOT_SIZE, MODEL_SLOT_SIZE)
+            gl.bindBufferRange(gl.UNIFORM_BUFFER, UBO_JOINTS, this.jointUBO, slot * JOINT_SLOT_SIZE, JOINT_SLOT_SIZE)
+            gl.bindVertexArray(geo.vao)
+            gl.drawElements(gl.TRIANGLES, geo.indexCount, geo.indexType, 0)
+          }
+        }
       }
 
+      gl.disable(gl.SCISSOR_TEST)
       gl.disable(gl.POLYGON_OFFSET_FILL)
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)

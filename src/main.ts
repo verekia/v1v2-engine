@@ -119,11 +119,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Shadows ───────────────────────────────────────────────────────────
   scene.shadow.enabled = true
-  scene.shadow.target.set([100, 100, 0])
-  scene.shadow.distance = 400
-  scene.shadow.extent = 150
-  scene.shadow.near = 1
-  scene.shadow.far = 800
+  scene.shadow.cascades = 4
+  scene.shadow.far = 200
   scene.shadow.bias = 0.0001
 
   // ── Bloom ───────────────────────────────────────────────────────────

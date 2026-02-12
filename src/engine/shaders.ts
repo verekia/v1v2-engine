@@ -17,11 +17,15 @@ struct Model {
 @group(1) @binding(0) var<uniform> model : Model;
 
 struct Lighting {
-  direction    : vec4f,
-  dirColor     : vec4f,
-  ambientColor : vec4f,
-  lightVP      : mat4x4f,
-  shadowParams : vec4f,
+  direction      : vec4f,
+  dirColor       : vec4f,
+  ambientColor   : vec4f,
+  lightVP0       : mat4x4f,
+  lightVP1       : mat4x4f,
+  lightVP2       : mat4x4f,
+  lightVP3       : mat4x4f,
+  shadowParams   : vec4f,
+  cascadeSplits  : vec4f,
 };
 @group(2) @binding(0) var<uniform> lighting : Lighting;
 @group(2) @binding(1) var shadowMap : texture_depth_2d;
@@ -31,7 +35,7 @@ struct VSOut {
   @builtin(position) pos        : vec4f,
   @location(0)       worldNorm  : vec3f,
   @location(1)       vertColor  : vec3f,
-  @location(2)       shadowCoord : vec3f,
+  @location(2)       worldPos   : vec3f,
 };
 
 // Poisson disk samples (9 taps)
@@ -47,29 +51,77 @@ const POISSON_DISK = array<vec2f, 9>(
   vec2f( 0.125,  -0.2165),
 );
 
-fn pcfShadow(coord : vec3f) -> f32 {
+// Atlas tile offsets for 2×2 cascade grid (in UV space: each tile is 0.5×0.5)
+const CASCADE_OFFSET = array<vec2f, 4>(
+  vec2f(0.0, 0.0),   // cascade 0: top-left
+  vec2f(0.5, 0.0),   // cascade 1: top-right
+  vec2f(0.0, 0.5),   // cascade 2: bottom-left
+  vec2f(0.5, 0.5),   // cascade 3: bottom-right
+);
+
+fn getLightVP(idx : i32) -> mat4x4f {
+  switch (idx) {
+    case 1: { return lighting.lightVP1; }
+    case 2: { return lighting.lightVP2; }
+    case 3: { return lighting.lightVP3; }
+    default: { return lighting.lightVP0; }
+  }
+}
+
+fn csmShadow(worldPos : vec3f, worldNorm : vec3f) -> f32 {
   let bias = lighting.shadowParams.x;
+  let normalBias = lighting.shadowParams.y;
   let texelSize = lighting.shadowParams.z;
   let enabled = lighting.shadowParams.w;
-  // Sample unconditionally (textureSampleCompare requires uniform control flow)
-  let refDepth = coord.z - bias;
-  // Clamp UV to valid range for sampling (out-of-bounds handled after)
-  let uv = clamp(coord.xy, vec2f(0.0), vec2f(1.0));
-  // Per-pixel pseudo-random rotation from fragment position
-  let rnd = fract(sin(dot(coord.xy, vec2f(12.9898, 78.233))) * 43758.5453);
+
+  // Compute view-space Z for cascade selection
+  let viewPos = camera.view * vec4f(worldPos, 1.0);
+  let viewZ = -viewPos.z; // positive distance from camera
+
+  // Select cascade based on view-space depth
+  var cascadeIdx = 0;
+  if (viewZ > lighting.cascadeSplits.x) { cascadeIdx = 1; }
+  if (viewZ > lighting.cascadeSplits.y) { cascadeIdx = 2; }
+  if (viewZ > lighting.cascadeSplits.z) { cascadeIdx = 3; }
+
+  // Offset along normal to reduce contact shadows
+  let shadowPos = worldPos + normalize(worldNorm) * normalBias;
+  let lightVP = getLightVP(cascadeIdx);
+  let lightClip = lightVP * vec4f(shadowPos, 1.0);
+
+  // Light-space to [0,1] UV within cascade tile
+  let tileCoord = vec3f(
+    lightClip.x * 0.5 + 0.5,
+    1.0 - (lightClip.y * 0.5 + 0.5),
+    lightClip.z,
+  );
+
+  // Map tile UV to atlas UV (each tile is 0.5 of atlas)
+  let atlasOffset = CASCADE_OFFSET[cascadeIdx];
+  let atlasUV = atlasOffset + tileCoord.xy * 0.5;
+
+  let refDepth = tileCoord.z - bias;
+
+  // Clamp for sampling
+  let sampUV = clamp(atlasUV, atlasOffset, atlasOffset + vec2f(0.5));
+
+  // Per-pixel pseudo-random rotation
+  let rnd = fract(sin(dot(atlasUV, vec2f(12.9898, 78.233))) * 43758.5453);
   let angle = rnd * 6.2831853;
   let cosA = cos(angle);
   let sinA = sin(angle);
   let rotMat = mat2x2f(cosA, sinA, -sinA, cosA);
+
   var shadow = 0.0;
-  let spread = texelSize * 1.0;
+  let spread = texelSize * 0.5; // 0.5 because atlas UV is half of tile UV
   for (var i = 0; i < 9; i++) {
     let offset = rotMat * POISSON_DISK[i] * spread;
-    shadow += textureSampleCompare(shadowMap, shadowSampler, uv + offset, refDepth);
+    shadow += textureSampleCompare(shadowMap, shadowSampler, sampUV + offset, refDepth);
   }
   shadow /= 9.0;
-  // Outside shadow map (XY or Z) or disabled -> fully lit
-  let inBounds = step(0.0, coord.x) * step(coord.x, 1.0) * step(0.0, coord.y) * step(coord.y, 1.0) * step(0.0, coord.z) * step(coord.z, 1.0);
+
+  // Outside tile bounds or disabled → fully lit
+  let inBounds = step(0.0, tileCoord.x) * step(tileCoord.x, 1.0) * step(0.0, tileCoord.y) * step(tileCoord.y, 1.0) * step(0.0, tileCoord.z) * step(tileCoord.z, 1.0);
   return mix(1.0, shadow, inBounds * step(0.5, enabled));
 }
 
@@ -77,7 +129,7 @@ fn lambertColor(input : VSOut) -> vec4f {
   let N = normalize(input.worldNorm);
   let L = normalize(-lighting.direction.xyz);
   let NdotL = max(dot(N, L), 0.0);
-  let shadow = pcfShadow(input.shadowCoord);
+  let shadow = csmShadow(input.worldPos, input.worldNorm);
   let diffuse  = lighting.dirColor.rgb * NdotL * shadow;
   let ambient  = lighting.ambientColor.rgb;
   let finalColor = model.color.rgb * input.vertColor * (diffuse + ambient);
@@ -117,18 +169,9 @@ struct VSIn {
   var out : VSOut;
   let worldPos = model.world * vec4f(input.position, 1.0);
   out.pos = camera.projection * camera.view * worldPos;
-  let worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
-  out.worldNorm = worldNorm;
+  out.worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
   out.vertColor = input.color;
-  // Shadow coord: offset along normal to reduce light bleeding at contact edges
-  let normalBias = lighting.shadowParams.y;
-  let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
-  let lightClip = lighting.lightVP * vec4f(shadowPos, 1.0);
-  out.shadowCoord = vec3f(
-    lightClip.x * 0.5 + 0.5,
-    1.0 - (lightClip.y * 0.5 + 0.5),
-    lightClip.z,
-  );
+  out.worldPos = worldPos.xyz;
   return out;
 }
 `
@@ -157,17 +200,9 @@ struct VSIn {
 
   let worldPos = model.world * skinMat * vec4f(input.position, 1.0);
   out.pos = camera.projection * camera.view * worldPos;
-  let worldNorm = (model.world * skinMat * vec4f(input.normal, 0.0)).xyz;
-  out.worldNorm = worldNorm;
+  out.worldNorm = (model.world * skinMat * vec4f(input.normal, 0.0)).xyz;
   out.vertColor = input.color;
-  let normalBias = lighting.shadowParams.y;
-  let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
-  let lightClip = lighting.lightVP * vec4f(shadowPos, 1.0);
-  out.shadowCoord = vec3f(
-    lightClip.x * 0.5 + 0.5,
-    1.0 - (lightClip.y * 0.5 + 0.5),
-    lightClip.z,
-  );
+  out.worldPos = worldPos.xyz;
   return out;
 }
 `
@@ -192,11 +227,15 @@ struct Model {
 @group(1) @binding(0) var<uniform> model : Model;
 
 struct Lighting {
-  direction    : vec4f,
-  dirColor     : vec4f,
-  ambientColor : vec4f,
-  lightVP      : mat4x4f,
-  shadowParams : vec4f,
+  direction      : vec4f,
+  dirColor       : vec4f,
+  ambientColor   : vec4f,
+  lightVP0       : mat4x4f,
+  lightVP1       : mat4x4f,
+  lightVP2       : mat4x4f,
+  lightVP3       : mat4x4f,
+  shadowParams   : vec4f,
+  cascadeSplits  : vec4f,
 };
 @group(2) @binding(0) var<uniform> lighting : Lighting;
 @group(2) @binding(1) var shadowMap : texture_depth_2d;
@@ -209,7 +248,7 @@ struct VSOut {
   @builtin(position) pos        : vec4f,
   @location(0)       worldNorm  : vec3f,
   @location(1)       vertColor  : vec3f,
-  @location(2)       shadowCoord : vec3f,
+  @location(2)       worldPos   : vec3f,
   @location(3)       vUV        : vec2f,
 };
 
@@ -226,25 +265,58 @@ const POISSON_DISK = array<vec2f, 9>(
   vec2f( 0.125,  -0.2165),
 );
 
-fn pcfShadow(coord : vec3f) -> f32 {
+const CASCADE_OFFSET = array<vec2f, 4>(
+  vec2f(0.0, 0.0),
+  vec2f(0.5, 0.0),
+  vec2f(0.0, 0.5),
+  vec2f(0.5, 0.5),
+);
+
+fn getLightVP(idx : i32) -> mat4x4f {
+  switch (idx) {
+    case 1: { return lighting.lightVP1; }
+    case 2: { return lighting.lightVP2; }
+    case 3: { return lighting.lightVP3; }
+    default: { return lighting.lightVP0; }
+  }
+}
+
+fn csmShadow(worldPos : vec3f, worldNorm : vec3f) -> f32 {
   let bias = lighting.shadowParams.x;
+  let normalBias = lighting.shadowParams.y;
   let texelSize = lighting.shadowParams.z;
   let enabled = lighting.shadowParams.w;
-  let refDepth = coord.z - bias;
-  let uv = clamp(coord.xy, vec2f(0.0), vec2f(1.0));
-  let rnd = fract(sin(dot(coord.xy, vec2f(12.9898, 78.233))) * 43758.5453);
+  let viewPos = camera.view * vec4f(worldPos, 1.0);
+  let viewZ = -viewPos.z;
+  var cascadeIdx = 0;
+  if (viewZ > lighting.cascadeSplits.x) { cascadeIdx = 1; }
+  if (viewZ > lighting.cascadeSplits.y) { cascadeIdx = 2; }
+  if (viewZ > lighting.cascadeSplits.z) { cascadeIdx = 3; }
+  let shadowPos = worldPos + normalize(worldNorm) * normalBias;
+  let lightVP = getLightVP(cascadeIdx);
+  let lightClip = lightVP * vec4f(shadowPos, 1.0);
+  let tileCoord = vec3f(
+    lightClip.x * 0.5 + 0.5,
+    1.0 - (lightClip.y * 0.5 + 0.5),
+    lightClip.z,
+  );
+  let atlasOffset = CASCADE_OFFSET[cascadeIdx];
+  let atlasUV = atlasOffset + tileCoord.xy * 0.5;
+  let refDepth = tileCoord.z - bias;
+  let sampUV = clamp(atlasUV, atlasOffset, atlasOffset + vec2f(0.5));
+  let rnd = fract(sin(dot(atlasUV, vec2f(12.9898, 78.233))) * 43758.5453);
   let angle = rnd * 6.2831853;
   let cosA = cos(angle);
   let sinA = sin(angle);
   let rotMat = mat2x2f(cosA, sinA, -sinA, cosA);
   var shadow = 0.0;
-  let spread = texelSize * 1.0;
+  let spread = texelSize * 0.5;
   for (var i = 0; i < 9; i++) {
     let offset = rotMat * POISSON_DISK[i] * spread;
-    shadow += textureSampleCompare(shadowMap, shadowSampler, uv + offset, refDepth);
+    shadow += textureSampleCompare(shadowMap, shadowSampler, sampUV + offset, refDepth);
   }
   shadow /= 9.0;
-  let inBounds = step(0.0, coord.x) * step(coord.x, 1.0) * step(0.0, coord.y) * step(coord.y, 1.0) * step(0.0, coord.z) * step(coord.z, 1.0);
+  let inBounds = step(0.0, tileCoord.x) * step(tileCoord.x, 1.0) * step(0.0, tileCoord.y) * step(tileCoord.y, 1.0) * step(0.0, tileCoord.z) * step(tileCoord.z, 1.0);
   return mix(1.0, shadow, inBounds * step(0.5, enabled));
 }
 
@@ -252,7 +324,7 @@ fn texturedLambertColor(input : VSOut) -> vec4f {
   let N = normalize(input.worldNorm);
   let L = normalize(-lighting.direction.xyz);
   let NdotL = max(dot(N, L), 0.0);
-  let shadow = pcfShadow(input.shadowCoord);
+  let shadow = csmShadow(input.worldPos, input.worldNorm);
   let diffuse  = lighting.dirColor.rgb * NdotL * shadow;
   let ao = textureSample(aoTexture, aoSampler, input.vUV).r;
   let ambient  = lighting.ambientColor.rgb * ao;
@@ -294,18 +366,10 @@ struct VSIn {
   var out : VSOut;
   let worldPos = model.world * vec4f(input.position, 1.0);
   out.pos = camera.projection * camera.view * worldPos;
-  let worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
-  out.worldNorm = worldNorm;
+  out.worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
   out.vertColor = input.color;
   out.vUV = input.uv;
-  let normalBias = lighting.shadowParams.y;
-  let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
-  let lightClip = lighting.lightVP * vec4f(shadowPos, 1.0);
-  out.shadowCoord = vec3f(
-    lightClip.x * 0.5 + 0.5,
-    1.0 - (lightClip.y * 0.5 + 0.5),
-    lightClip.z,
-  );
+  out.worldPos = worldPos.xyz;
   return out;
 }
 `
