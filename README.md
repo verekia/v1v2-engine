@@ -7,7 +7,7 @@ A minimal, high-performance WebGPU/WebGL rendering engine with a Three.js-like A
 ## Quickstart
 
 ```ts
-import { createScene, Mesh, OrbitControls, cubeVertices, cubeIndices } from '@v1v2/engine'
+import { createScene, Mesh, OrbitControls, Scheduler, cubeVertices, cubeIndices } from '@v1v2/engine'
 
 const canvas = document.querySelector('canvas')!
 const scene = await createScene(canvas)
@@ -38,15 +38,18 @@ scene.setAmbientLight([0.8, 0.8, 0.8])
 scene.shadow.enabled = true
 scene.shadow.target.set([0, 0, 0])
 
-// Render loop
-function loop() {
-  cube.rotation[2]! += 0.01
+// Scheduler
+const scheduler = new Scheduler(scene)
+scheduler.maxFps = 60
+
+scheduler.register(({ dt }) => {
+  cube.rotation[2]! += dt
   scene.camera.eye.set(orbit.eye)
   scene.camera.target.set(orbit.target)
   scene.render()
-  requestAnimationFrame(loop)
-}
-requestAnimationFrame(loop)
+})
+
+scheduler.start()
 ```
 
 ## Features
@@ -65,6 +68,7 @@ requestAnimationFrame(loop)
 - HTML overlay (project DOM elements to 3D world positions)
 - Orbit controls (pan, rotate, zoom)
 - Transparent object sorting (back-to-front)
+- Priority-based rAF scheduler with global and per-callback FPS throttling
 - Zero per-frame allocations in the hot path
 
 ## API
@@ -243,6 +247,36 @@ overlay.update(scene)
 scene.render() // sync + draw in one call
 scene.resize(width, height) // resize canvas/backbuffer
 scene.drawCalls // frame draw call count
+```
+
+### Scheduler
+
+Priority-based rAF loop with optional per-callback and global FPS throttling.
+
+```ts
+import { Scheduler } from '@v1v2/engine'
+
+const scheduler = new Scheduler(scene)
+
+// Global FPS cap — throttles the entire loop (0 = uncapped)
+scheduler.maxFps = 60
+
+// Register callbacks with priority ordering (lower = earlier)
+const unsub = scheduler.register(
+  ({ scene, dt, elapsed, frame }) => {
+    // dt = seconds since last tick (capped at 0.1s)
+    player.position[1]! += speed * dt
+  },
+  { priority: -1 },
+)
+
+// Per-callback FPS throttle (independent of global cap)
+scheduler.register(({ scene }) => scene.render(), { priority: 0, fps: 30 })
+
+scheduler.start()
+scheduler.stop() // pause (resumable)
+unsub() // remove a callback
+scheduler.destroy() // stop + remove all
 ```
 
 ### Backend switching

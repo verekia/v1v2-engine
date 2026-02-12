@@ -584,6 +584,31 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     })
   }
 
+  // FPS cap slider
+  {
+    const row = document.createElement('div')
+    row.style.cssText = 'display:flex;align-items:center;gap:6px'
+    const slider = document.createElement('input')
+    slider.type = 'range'
+    slider.id = 'fps-slider'
+    slider.min = '30'
+    slider.max = '120'
+    slider.value = '60'
+    slider.style.cssText = 'cursor:pointer;width:80px'
+    const lbl = document.createElement('label')
+    lbl.htmlFor = 'fps-slider'
+    lbl.textContent = 'Max FPS: 60'
+    lbl.style.cssText = 'cursor:pointer'
+    row.appendChild(slider)
+    row.appendChild(lbl)
+    controls.appendChild(row)
+    slider.addEventListener('input', () => {
+      const fps = Number(slider.value)
+      lbl.textContent = `Max FPS: ${fps}`
+      scheduler.maxFps = fps
+    })
+  }
+
   observeResize()
 
   // ── Raycast receiver (reused every frame — no allocations) ──────────
@@ -592,6 +617,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   // ── Scheduler ─────────────────────────────────────────────────────────
   scheduler = new Scheduler(scene)
+  scheduler.maxFps = 60
 
   // Input (runs first)
   scheduler.register(

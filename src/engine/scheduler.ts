@@ -42,6 +42,7 @@ export class Scheduler {
   private _elapsed = 0
   private _frame = 0
   private _running = false
+  private _maxFpsInterval = 0 // 0 = no global limit, else ms between ticks
 
   // Reusable state object — avoids per-frame allocation
   private _state: SchedulerState
@@ -49,6 +50,15 @@ export class Scheduler {
   constructor(scene: Scene) {
     this._scene = scene
     this._state = { scene, dt: 0, elapsed: 0, frame: 0 }
+  }
+
+  /** Global FPS cap applied to the entire loop. 0 = uncapped (run every rAF). */
+  get maxFps(): number {
+    return this._maxFpsInterval > 0 ? 1000 / this._maxFpsInterval : 0
+  }
+
+  set maxFps(fps: number) {
+    this._maxFpsInterval = fps > 0 ? 1000 / fps : 0
   }
 
   /**
@@ -97,6 +107,12 @@ export class Scheduler {
 
   private _loop = (now: number): void => {
     if (!this._running) return
+
+    // Global FPS cap — skip entire tick if too early
+    if (this._maxFpsInterval > 0 && now - this._lastTime < this._maxFpsInterval - 1) {
+      this._rafId = requestAnimationFrame(this._loop)
+      return
+    }
 
     const dt = Math.min((now - this._lastTime) / 1000, 0.1)
     this._lastTime = now

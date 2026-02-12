@@ -37,6 +37,7 @@ The engine is pure TypeScript with no React dependency. All engine code lives un
 - **`gltf.ts`** — GLB/glTF loader with Draco support.
 - **`skin.ts`** — GPU skinning: skeleton, skin instances, animation sampling with crossfade blending.
 - **`bvh.ts`** — SAH-binned BVH acceleration structure for raycasting. Flat-array node storage, stack-based traversal, Möller–Trumbore intersection.
+- **`scheduler.ts`** — Priority-based rAF scheduler with global and per-callback FPS throttling. Drives the main loop.
 - **`orbit-controls.ts`** — Spherical orbit camera controls.
 - **`html-overlay.ts`** — `HtmlOverlay` / `HtmlElement` for projecting DOM elements to 3D world positions with distance-based scaling.
 - **`ktx2.ts`** — KTX2/Basis Universal texture loader, transcodes to RGBA8.
@@ -63,12 +64,15 @@ scene.shadow.enabled = true
 scene.bloom.enabled = true
 scene.outline.enabled = true
 
-function loop() {
-  mesh.rotation[2] += 0.01
+const scheduler = new Scheduler(scene)
+scheduler.maxFps = 60
+
+scheduler.register(({ dt }) => {
+  mesh.rotation[2] += dt
   scene.render()
-  requestAnimationFrame(loop)
-}
-requestAnimationFrame(loop)
+})
+
+scheduler.start()
 ```
 
 ### Raycasting (BVH-accelerated):
@@ -121,6 +125,47 @@ label.mesh = someMesh // track a mesh instead of fixed position
 overlay.update(scene) // call each frame to project 3D → 2D
 ```
 
+### Scheduler:
+
+```ts
+const scheduler = new Scheduler(scene)
+scheduler.maxFps = 60 // global cap (0 = uncapped)
+
+// Priority ordering: lower runs first. Negative priorities run before default (0).
+scheduler.register(
+  ({ dt }) => {
+    /* input */
+  },
+  { priority: -2 },
+)
+scheduler.register(
+  ({ dt }) => {
+    /* physics */
+  },
+  { priority: -1 },
+)
+scheduler.register(
+  ({ scene: s }) => {
+    s.render()
+  },
+  { priority: 0 },
+)
+
+// Per-callback throttle (e.g. UI updates at 10fps)
+scheduler.register(
+  ({ elapsed }) => {
+    updateStats(elapsed)
+  },
+  { fps: 10 },
+)
+
+scheduler.start()
+scheduler.stop() // pause (resumable)
+scheduler.destroy() // stop + remove all
+```
+
+`SchedulerState` fields: `scene`, `dt` (seconds, capped 0.1), `elapsed` (total seconds), `frame` (tick count).
+
 ### Internal performance architecture:
 
 Internally, `Scene` uses a **Structure-of-Arrays** layout — parallel TypedArrays for positions, scales, world matrices, colors, etc. On each `scene.render()` call, mesh object data is synced to these dense arrays, world matrices are computed via `m4FromTRS`, and the result is passed to the renderer as a zero-copy `RenderScene` interface. This gives Three.js-like ergonomics with high performance.
@@ -140,6 +185,7 @@ Internally, `Scene` uses a **Structure-of-Arrays** layout — parallel TypedArra
 - **Bone Attachment** (`engine/scene.ts`): `scene.attachToBone(mesh, parentMesh, boneName)` parents a mesh to a skeleton bone. World matrix is computed from the bone's global matrix each frame. Used for weapons/props on animated characters.
 - **Bloom** (`engine/renderer.ts` + `engine/webgl-renderer.ts`): 5-mip downsample/upsample chain via MRT. Meshes with `bloom > 0` emit into a separate render target, which is blurred and composited.
 - **Outline** (`engine/renderer.ts` + `engine/webgl-renderer.ts`): MRT-based outline rendering. Meshes with `outline > 0` write a group ID; edges between groups are detected and drawn.
+- **Scheduler** (`engine/scheduler.ts`): Priority-based rAF loop. `scheduler.register(cb, { priority, fps })` adds callbacks executed in ascending priority order. `scheduler.maxFps` caps the entire loop globally (1ms tolerance for rAF jitter). Per-callback `fps` throttle computes correct `dt` for the throttled callback. Unsub nullifies the entry (compacted lazily on next sort pass) — safe to call mid-frame.
 - **HTML Overlay** (`engine/html-overlay.ts`): Projects DOM elements to 3D world positions using the scene's view/projection matrices. Supports mesh tracking and distance-based scaling.
 - **KTX2 Textures** (`engine/ktx2.ts`): Loads KTX2/Basis Universal textures, transcodes to RGBA8 via the Basis transcoder WASM.
 
