@@ -32,6 +32,7 @@ struct VSOut {
   @location(0)       worldNorm  : vec3f,
   @location(1)       vertColor  : vec3f,
   @location(2)       shadowCoord : vec3f,
+  @location(3)       vertBloom  : f32,
 };
 
 // Poisson disk samples (9 taps)
@@ -96,9 +97,10 @@ struct FragOutput {
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
   let c = lambertColor(input);
+  let bloomVal = max(input.vertBloom, model.bloom);
   var out : FragOutput;
-  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
-  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), bloomVal * model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * bloomVal, c.a);
   out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
@@ -111,6 +113,7 @@ struct VSIn {
   @location(0) position : vec3f,
   @location(1) normal   : vec3f,
   @location(2) color    : vec3f,
+  @location(3) bloom    : f32,
 };
 
 @vertex fn vs(input : VSIn) -> VSOut {
@@ -120,6 +123,7 @@ struct VSIn {
   let worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
   out.worldNorm = worldNorm;
   out.vertColor = input.color;
+  out.vertBloom = input.bloom;
   // Shadow coord: offset along normal to reduce light bleeding at contact edges
   let normalBias = lighting.shadowParams.y;
   let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
@@ -142,8 +146,9 @@ struct VSIn {
   @location(0) position : vec3f,
   @location(1) normal   : vec3f,
   @location(2) color    : vec3f,
-  @location(3) joints   : vec4u,
-  @location(4) weights  : vec4f,
+  @location(3) bloom    : f32,
+  @location(4) joints   : vec4u,
+  @location(5) weights  : vec4f,
 };
 
 @vertex fn vs(input : VSIn) -> VSOut {
@@ -160,6 +165,7 @@ struct VSIn {
   let worldNorm = (model.world * skinMat * vec4f(input.normal, 0.0)).xyz;
   out.worldNorm = worldNorm;
   out.vertColor = input.color;
+  out.vertBloom = input.bloom;
   let normalBias = lighting.shadowParams.y;
   let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
   let lightClip = lighting.lightVP * vec4f(shadowPos, 1.0);
@@ -210,7 +216,8 @@ struct VSOut {
   @location(0)       worldNorm  : vec3f,
   @location(1)       vertColor  : vec3f,
   @location(2)       shadowCoord : vec3f,
-  @location(3)       vUV        : vec2f,
+  @location(3)       vertBloom  : f32,
+  @location(4)       vUV        : vec2f,
 };
 
 // Poisson disk samples (9 taps)
@@ -272,9 +279,10 @@ struct FragOutput {
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
   let c = texturedLambertColor(input);
+  let bloomVal = max(input.vertBloom, model.bloom);
   var out : FragOutput;
-  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
-  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), bloomVal * model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * bloomVal, c.a);
   out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
@@ -287,7 +295,8 @@ struct VSIn {
   @location(0) position : vec3f,
   @location(1) normal   : vec3f,
   @location(2) color    : vec3f,
-  @location(3) uv       : vec2f,
+  @location(3) bloom    : f32,
+  @location(4) uv       : vec2f,
 };
 
 @vertex fn vs(input : VSIn) -> VSOut {
@@ -297,6 +306,7 @@ struct VSIn {
   let worldNorm = (model.world * vec4f(input.normal, 0.0)).xyz;
   out.worldNorm = worldNorm;
   out.vertColor = input.color;
+  out.vertBloom = input.bloom;
   out.vUV = input.uv;
   let normalBias = lighting.shadowParams.y;
   let shadowPos = worldPos.xyz + normalize(worldNorm) * normalBias;
@@ -332,12 +342,14 @@ struct Model {
 struct VSOut {
   @builtin(position) pos       : vec4f,
   @location(0)       vertColor : vec3f,
+  @location(1)       vertBloom : f32,
 };
 
 struct VSIn {
   @location(0) position : vec3f,
   @location(1) normal   : vec3f,
   @location(2) color    : vec3f,
+  @location(3) bloom    : f32,
 };
 
 @vertex fn vs(input : VSIn) -> VSOut {
@@ -345,6 +357,7 @@ struct VSIn {
   let worldPos = model.world * vec4f(input.position, 1.0);
   out.pos = camera.projection * camera.view * worldPos;
   out.vertColor = input.color;
+  out.vertBloom = input.bloom;
   return out;
 }
 
@@ -364,9 +377,10 @@ struct FragOutput {
 
 @fragment fn fsMRT(input : VSOut) -> FragOutput {
   let c = unlitColor(input);
+  let bloomVal = max(input.vertBloom, model.bloom);
   var out : FragOutput;
-  out.color = vec4f(mix(c.rgb, vec3f(1.0), model.bloomWhiten), c.a);
-  out.bloomOut = vec4f(c.rgb * model.bloom, c.a);
+  out.color = vec4f(mix(c.rgb, vec3f(1.0), bloomVal * model.bloomWhiten), c.a);
+  out.bloomOut = vec4f(c.rgb * bloomVal, c.a);
   out.outlineOut = vec4f(model.outline, model.outlineScale, 0.0, 1.0);
   return out;
 }
@@ -418,8 +432,8 @@ struct Model {
 
 @vertex fn vs(
   @location(0) position : vec3f,
-  @location(3) joints   : vec4u,
-  @location(4) weights  : vec4f,
+  @location(4) joints   : vec4u,
+  @location(5) weights  : vec4f,
 ) -> @builtin(position) vec4f {
   let skinMat =
     weights.x * jointMatrices[joints.x] +

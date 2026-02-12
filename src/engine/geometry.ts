@@ -1,4 +1,4 @@
-// Interleaved: [px, py, pz, nx, ny, nz, cr, cg, cb] per vertex (stride 36 bytes)
+// Interleaved: [px, py, pz, nx, ny, nz, cr, cg, cb, bloom] per vertex (stride 40 bytes)
 // Z-up coordinate system: width=X, height=Z(up), depth=Y(forward)
 
 // ── Box ─────────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ export function createBoxGeometry(
   const totalVerts = 2 * (ws + 1) * (ds + 1) + 2 * (ws + 1) * (hs + 1) + 2 * (hs + 1) * (ds + 1)
   const totalIdx = 2 * ws * ds * 6 + 2 * ws * hs * 6 + 2 * hs * ds * 6
 
-  const vertices = new Float32Array(totalVerts * 9)
+  const vertices = new Float32Array(totalVerts * 10)
   const indices = new Uint16Array(totalIdx)
   let vi = 0
   let ii = 0
@@ -50,6 +50,7 @@ export function createBoxGeometry(
         vertices[vi++] = 1
         vertices[vi++] = 1
         vertices[vi++] = 1
+        vertices[vi++] = 0 // bloom
       }
     }
     const row = uSegs + 1
@@ -95,7 +96,7 @@ export function createSphereGeometry(
   const ws = Math.max(3, widthSegments | 0)
   const hs = Math.max(2, heightSegments | 0)
   const vertCount = (hs + 1) * (ws + 1)
-  const vertices = new Float32Array(vertCount * 9)
+  const vertices = new Float32Array(vertCount * 10)
   const sign = inverted ? -1 : 1
   let vi = 0
 
@@ -117,6 +118,7 @@ export function createSphereGeometry(
       vertices[vi++] = 1
       vertices[vi++] = 1
       vertices[vi++] = 1
+      vertices[vi++] = 0 // bloom
     }
   }
 
@@ -157,6 +159,7 @@ export function mergeGeometries(
     vertices: Float32Array
     indices: Uint16Array | Uint32Array
     color: [number, number, number]
+    bloom?: number
     uvs?: Float32Array
   }[],
 ): { vertices: Float32Array; indices: Uint32Array; uvs?: Float32Array } {
@@ -164,20 +167,20 @@ export function mergeGeometries(
   let totalIdxs = 0
   let hasAnyUVs = false
   for (const p of primitives) {
-    totalVerts += p.vertices.length / 9
+    totalVerts += p.vertices.length / 10
     totalIdxs += p.indices.length
     if (p.uvs) hasAnyUVs = true
   }
-  const vertices = new Float32Array(totalVerts * 9)
+  const vertices = new Float32Array(totalVerts * 10)
   const indices = new Uint32Array(totalIdxs)
   const uvs = hasAnyUVs ? new Float32Array(totalVerts * 2) : undefined
   let vertOff = 0
   let idxOff = 0
   for (const p of primitives) {
-    const vCount = p.vertices.length / 9
+    const vCount = p.vertices.length / 10
     for (let v = 0; v < vCount; v++) {
-      const src = v * 9
-      const dst = (vertOff + v) * 9
+      const src = v * 10
+      const dst = (vertOff + v) * 10
       vertices[dst]! = p.vertices[src]!
       vertices[dst + 1]! = p.vertices[src + 1]!
       vertices[dst + 2]! = p.vertices[src + 2]!
@@ -187,6 +190,7 @@ export function mergeGeometries(
       vertices[dst + 6]! = p.color[0]
       vertices[dst + 7]! = p.color[1]
       vertices[dst + 8]! = p.color[2]
+      vertices[dst + 9]! = p.bloom ?? 0
       if (uvs) {
         const uvDst = (vertOff + v) * 2
         if (p.uvs) {

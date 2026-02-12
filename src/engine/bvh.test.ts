@@ -81,17 +81,17 @@ describe('raycastBVH', () => {
   })
 
   test('works with a ground plane (two triangles)', () => {
-    // 9 floats per vertex: px,py,pz, nx,ny,nz, cr,cg,cb
+    // 10 floats per vertex: px,py,pz, nx,ny,nz, cr,cg,cb, bloom
     // A 10×10 quad on the XY plane at Z=0
     const vertices = new Float32Array([
-      // v0: (-5, -5, 0) normal (0,0,1) color (1,1,1)
-      -5, -5, 0, 0, 0, 1, 1, 1, 1,
+      // v0: (-5, -5, 0) normal (0,0,1) color (1,1,1) bloom 0
+      -5, -5, 0, 0, 0, 1, 1, 1, 1, 0,
       // v1: (5, -5, 0)
-      5, -5, 0, 0, 0, 1, 1, 1, 1,
+      5, -5, 0, 0, 0, 1, 1, 1, 1, 0,
       // v2: (5, 5, 0)
-      5, 5, 0, 0, 0, 1, 1, 1, 1,
+      5, 5, 0, 0, 0, 1, 1, 1, 1, 0,
       // v3: (-5, 5, 0)
-      -5, 5, 0, 0, 0, 1, 1, 1, 1,
+      -5, 5, 0, 0, 0, 1, 1, 1, 1, 0,
     ])
     const indices = new Uint16Array([0, 1, 2, 0, 2, 3])
     const bvh = buildBVH(vertices, indices)

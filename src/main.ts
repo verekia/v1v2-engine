@@ -36,7 +36,7 @@ function splitByMaterial(
       if (!vertexMap.has(oldIdx)) {
         const newI = vertexMap.size
         vertexMap.set(oldIdx, newI)
-        for (let j = 0; j < 9; j++) newVerts.push(vertices[oldIdx * 9 + j]!)
+        for (let j = 0; j < 10; j++) newVerts.push(vertices[oldIdx * 10 + j]!)
       }
       newIdx.push(vertexMap.get(oldIdx)!)
     }
