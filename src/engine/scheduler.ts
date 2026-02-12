@@ -25,7 +25,7 @@ export type SchedulerCallback = (state: SchedulerState) => void
 // ── Internal entry ───────────────────────────────────────────────────────────
 
 interface SchedulerEntry {
-  callback: SchedulerCallback
+  callback: SchedulerCallback | null // null = removed, compacted on next sort pass
   priority: number
   fpsInterval: number // 0 = no throttle, else milliseconds between calls
   lastRunTime: number
@@ -66,8 +66,9 @@ export class Scheduler {
     this._sorted = false
 
     return () => {
-      const idx = this._entries.indexOf(entry)
-      if (idx >= 0) this._entries.splice(idx, 1)
+      if (!entry.callback) return // already removed
+      entry.callback = null
+      this._sorted = false // trigger compaction on next frame
     }
   }
 
@@ -102,8 +103,13 @@ export class Scheduler {
     this._elapsed += dt
     this._frame++
 
-    // Sort by priority (ascending) when entries have changed
+    // Compact dead entries + sort by priority when entries have changed
     if (!this._sorted) {
+      let write = 0
+      for (let read = 0; read < this._entries.length; read++) {
+        if (this._entries[read]!.callback) this._entries[write++] = this._entries[read]!
+      }
+      this._entries.length = write
       this._entries.sort((a, b) => a.priority - b.priority)
       this._sorted = true
     }
@@ -114,17 +120,26 @@ export class Scheduler {
     state.elapsed = this._elapsed
     state.frame = this._frame
 
-    // Execute callbacks in priority order
-    for (let i = 0; i < this._entries.length; i++) {
-      const entry = this._entries[i]!
+    // Execute callbacks in priority order.
+    // Cache length so mid-frame registrations don't execute this frame.
+    const entries = this._entries
+    const len = entries.length
+    for (let i = 0; i < len; i++) {
+      const entry = entries[i]!
+      if (!entry.callback) continue // removed mid-frame
 
-      // Per-callback FPS throttle
+      // Per-callback FPS throttle with corrected dt
       if (entry.fpsInterval > 0) {
-        if (now - entry.lastRunTime < entry.fpsInterval) continue
+        if (entry.lastRunTime > 0 && now - entry.lastRunTime < entry.fpsInterval) continue
+        if (entry.lastRunTime > 0) {
+          state.dt = Math.min((now - entry.lastRunTime) / 1000, 0.1)
+        }
         entry.lastRunTime = now
+        entry.callback(state)
+        state.dt = dt
+      } else {
+        entry.callback(state)
       }
-
-      entry.callback(state)
     }
 
     this._rafId = requestAnimationFrame(this._loop)
