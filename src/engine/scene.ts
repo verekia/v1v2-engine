@@ -817,7 +817,9 @@ export class Scene {
         minZ -= 200
 
         // Build ortho projection for this cascade
-        this._renderer.ortho(this._lightProj, 0, minX, maxX, minY, maxY, minZ, maxZ)
+        // ortho() expects positive near/far distances; light-space Z is negative for objects
+        // in front of the camera, so negate and swap: near = -maxZ, far = -minZ
+        this._renderer.ortho(this._lightProj, 0, minX, maxX, minY, maxY, -maxZ, -minZ)
 
         // VP = proj * view
         m4Multiply(this._cascadeVPs, c * 16, this._lightProj, 0, this._lightView, 0)

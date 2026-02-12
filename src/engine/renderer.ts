@@ -138,7 +138,7 @@ export class Renderer implements IRenderer {
   private shadowMapTexture: GPUTexture
   private shadowMapView: GPUTextureView
   private shadowCameraBuffer: GPUBuffer
-  private shadowCameraBG: GPUBindGroup
+  private shadowCameraBGs: GPUBindGroup[]
 
   // Buffers
   private cameraBuffer: GPUBuffer
@@ -786,9 +786,10 @@ export class Renderer implements IRenderer {
       size: JOINT_SLOT_SIZE * this.maxSkinnedEntities,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
-    // Shadow camera: 1 mat4 VP = 128 bytes (same layout as camera: view + proj, but we pack VP into view slot)
+    // Shadow camera: 4 cascade slots × 256 bytes each (256-byte uniform alignment)
+    // Each slot holds VP in view slot + identity in proj slot = 128 bytes used, 128 padding
     this.shadowCameraBuffer = device.createBuffer({
-      size: 128,
+      size: 4 * MODEL_SLOT_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
@@ -813,10 +814,14 @@ export class Renderer implements IRenderer {
       layout: jointBGL,
       entries: [{ binding: 0, resource: { buffer: this.jointBuffer, size: JOINT_SLOT_SIZE } }],
     })
-    this.shadowCameraBG = device.createBindGroup({
-      layout: cameraBGL,
-      entries: [{ binding: 0, resource: { buffer: this.shadowCameraBuffer } }],
-    })
+    this.shadowCameraBGs = Array.from({ length: 4 }, (_, c) =>
+      device.createBindGroup({
+        layout: cameraBGL,
+        entries: [
+          { binding: 0, resource: { buffer: this.shadowCameraBuffer, offset: c * MODEL_SLOT_SIZE, size: 128 } },
+        ],
+      }),
+    )
 
     // ── Bloom post-processing pipelines (downsample-upsample mip chain) ──
     const bloomDownsampleModule = device.createShaderModule({ code: bloomDownsampleShader })
@@ -1432,6 +1437,25 @@ export class Renderer implements IRenderer {
 
     // ── Shadow depth pass (cascaded) ──────────────────────────────────
     if (hasShadow) {
+      // Pre-upload all cascade camera slots before the render pass
+      // (writeBuffer to same offset inside a render pass would only keep the last write)
+      const shadowCamData = this.shadowCamData
+      for (let c = 0; c < cascadeCount; c++) {
+        for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowCascadeVPs![c * 16 + i]!
+        for (let i = 16; i < 32; i++) shadowCamData[i] = 0
+        shadowCamData[16] = 1
+        shadowCamData[21] = 1
+        shadowCamData[26] = 1
+        shadowCamData[31] = 1
+        device.queue.writeBuffer(
+          this.shadowCameraBuffer,
+          c * MODEL_SLOT_SIZE,
+          shadowCamData.buffer as ArrayBuffer,
+          0,
+          128,
+        )
+      }
+
       const shadowPass = encoder.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: {
@@ -1461,19 +1485,9 @@ export class Renderer implements IRenderer {
           SHADOW_CASCADE_SIZE,
         )
 
-        // Upload shadow camera: cascade VP in view slot, identity in proj slot
-        const shadowCamData = this.shadowCamData
-        for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowCascadeVPs![c * 16 + i]!
-        for (let i = 16; i < 32; i++) shadowCamData[i] = 0
-        shadowCamData[16] = 1
-        shadowCamData[21] = 1
-        shadowCamData[26] = 1
-        shadowCamData[31] = 1
-        device.queue.writeBuffer(this.shadowCameraBuffer, 0, shadowCamData.buffer as ArrayBuffer, 0, 128)
-
         // Static shadow casters
         shadowPass.setPipeline(this.shadowPipeline)
-        shadowPass.setBindGroup(0, this.shadowCameraBG)
+        shadowPass.setBindGroup(0, this.shadowCameraBGs[c]!)
 
         for (let i = 0; i < scene.entityCount; i++) {
           if (!scene.renderMask[i]) continue
@@ -1492,7 +1506,7 @@ export class Renderer implements IRenderer {
         // Skinned shadow casters
         if (skinnedSlotMap.size > 0) {
           shadowPass.setPipeline(this.shadowSkinnedPipeline)
-          shadowPass.setBindGroup(0, this.shadowCameraBG)
+          shadowPass.setBindGroup(0, this.shadowCameraBGs[c]!)
 
           for (let i = 0; i < scene.entityCount; i++) {
             if (!scene.renderMask[i] || !scene.skinnedMask[i]) continue
