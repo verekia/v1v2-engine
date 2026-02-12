@@ -28,7 +28,8 @@ interface SchedulerEntry {
   callback: SchedulerCallback | null // null = removed, compacted on next sort pass
   priority: number
   fpsInterval: number // 0 = no throttle, else milliseconds between calls
-  lastRunTime: number
+  lastRunTime: number // last tick timestamp this entry was evaluated at
+  fpsAccum: number // accumulator for per-callback throttle remainder tracking
 }
 
 // ── Scheduler ────────────────────────────────────────────────────────────────
@@ -43,6 +44,8 @@ export class Scheduler {
   private _frame = 0
   private _running = false
   private _maxFpsInterval = 0 // 0 = no global limit, else ms between ticks
+  private _maxFpsAccum = 0 // accumulator for remainder tracking
+  private _prevNow = 0 // previous rAF timestamp (updated every frame, even skips)
 
   // Reusable state object — avoids per-frame allocation
   private _state: SchedulerState
@@ -59,6 +62,7 @@ export class Scheduler {
 
   set maxFps(fps: number) {
     this._maxFpsInterval = fps > 0 ? 1000 / fps : 0
+    this._maxFpsAccum = 0
   }
 
   /**
@@ -71,6 +75,7 @@ export class Scheduler {
       priority: options?.priority ?? 0,
       fpsInterval: options?.fps ? 1000 / options.fps : 0,
       lastRunTime: 0,
+      fpsAccum: options?.fps ? 1000 / options.fps : 0, // fire on first evaluation
     }
     this._entries.push(entry)
     this._sorted = false
@@ -86,7 +91,10 @@ export class Scheduler {
   start(): void {
     if (this._running) return
     this._running = true
-    this._lastTime = performance.now()
+    const now = performance.now()
+    this._lastTime = now
+    this._prevNow = now
+    this._maxFpsAccum = this._maxFpsInterval // ensure first tick runs immediately
     this._rafId = requestAnimationFrame(this._loop)
   }
 
@@ -108,10 +116,19 @@ export class Scheduler {
   private _loop = (now: number): void => {
     if (!this._running) return
 
-    // Global FPS cap — skip entire tick if too early
-    if (this._maxFpsInterval > 0 && now - this._lastTime < this._maxFpsInterval - 1) {
-      this._rafId = requestAnimationFrame(this._loop)
-      return
+    // Global FPS cap with remainder tracking for accurate intermediate rates.
+    // Accumulates inter-rAF deltas and fires when the interval is reached,
+    // preserving the fractional remainder so average rate converges to target.
+    if (this._maxFpsInterval > 0) {
+      this._maxFpsAccum += now - this._prevNow
+      this._prevNow = now
+      if (this._maxFpsAccum < this._maxFpsInterval - 1) {
+        this._rafId = requestAnimationFrame(this._loop)
+        return
+      }
+      this._maxFpsAccum -= this._maxFpsInterval
+      // Clamp after long pauses (tab hidden) to prevent burst of catch-up ticks
+      if (this._maxFpsAccum > this._maxFpsInterval) this._maxFpsAccum = 0
     }
 
     const dt = Math.min((now - this._lastTime) / 1000, 0.1)
@@ -144,15 +161,19 @@ export class Scheduler {
       const entry = entries[i]!
       if (!entry.callback) continue // removed mid-frame
 
-      // Per-callback FPS throttle with corrected dt
+      // Per-callback FPS throttle with remainder tracking + corrected dt
       if (entry.fpsInterval > 0) {
-        if (entry.lastRunTime > 0 && now - entry.lastRunTime < entry.fpsInterval - 1) continue
-        if (entry.lastRunTime > 0) {
-          state.dt = Math.min((now - entry.lastRunTime) / 1000, 0.1)
-        }
+        if (entry.lastRunTime > 0) entry.fpsAccum += now - entry.lastRunTime
         entry.lastRunTime = now
+        if (entry.fpsAccum < entry.fpsInterval - 1) continue
+        const savedDt = state.dt
+        if (entry.fpsAccum < entry.fpsInterval * 2) {
+          state.dt = Math.min(entry.fpsAccum / 1000, 0.1)
+        }
+        entry.fpsAccum -= entry.fpsInterval
+        if (entry.fpsAccum > entry.fpsInterval) entry.fpsAccum = 0
         entry.callback(state)
-        state.dt = dt
+        state.dt = savedDt
       } else {
         entry.callback(state)
       }
