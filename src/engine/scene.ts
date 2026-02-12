@@ -497,6 +497,7 @@ export class Scene {
     this._renderer.destroy()
     this._renderer = await createRendererInternal(canvas, this._maxEntities, type, this._maxSkinnedEntities)
     this._canvas = canvas
+    this._renderScene = null
 
     // Re-register all geometries on the new renderer
     for (const [id, reg] of this._geoRegs) {
@@ -536,6 +537,8 @@ export class Scene {
 
       if (!m.visible) {
         this._renderMask[i] = 0
+        // Still compute world matrix — invisible meshes may be bone parents
+        m4FromTRS(this._worldMatrices, i * 16, m.position, 0, m.rotation, 0, m.scale, 0)
         continue
       }
 
