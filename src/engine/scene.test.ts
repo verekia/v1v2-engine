@@ -302,23 +302,22 @@ describe('Scene shadow config', () => {
   test('shadow defaults to disabled', () => {
     const scene = new Scene(createMockRenderer(), createMockCanvas(), 100)
     expect(scene.shadow.enabled).toBe(false)
-    expect(scene.shadow.distance).toBe(400)
-    expect(scene.shadow.extent).toBe(150)
-    expect(scene.shadow.near).toBe(1)
-    expect(scene.shadow.far).toBe(800)
+    expect(scene.shadow.cascades).toBe(4)
+    expect(scene.shadow.far).toBe(200)
     expect(scene.shadow.bias).toBe(0.0001)
+    expect(scene.shadow.lambda).toBe(0.5)
   })
 
   test('shadow config is mutable', () => {
     const scene = new Scene(createMockRenderer(), createMockCanvas(), 100)
     scene.shadow.enabled = true
-    scene.shadow.distance = 200
-    scene.shadow.extent = 50
-    scene.shadow.target.set([10, 20, 30])
+    scene.shadow.cascades = 2
+    scene.shadow.far = 100
+    scene.shadow.lambda = 0.8
     expect(scene.shadow.enabled).toBe(true)
-    expect(scene.shadow.distance).toBe(200)
-    expect(scene.shadow.extent).toBe(50)
-    expect(scene.shadow.target[0]).toBe(10)
+    expect(scene.shadow.cascades).toBe(2)
+    expect(scene.shadow.far).toBe(100)
+    expect(scene.shadow.lambda).toBe(0.8)
   })
 })
 
@@ -467,7 +466,7 @@ describe('Scene render', () => {
     }
   })
 
-  test('render without shadow does not set shadowLightViewProj', () => {
+  test('render without shadow does not set cascadeCount', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
     scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
@@ -477,7 +476,7 @@ describe('Scene render', () => {
     scene.render()
 
     const rs = renderer.lastRenderScene!
-    expect(rs.shadowLightViewProj).toBeUndefined()
+    expect(rs.shadowCascadeCount).toBe(0)
   })
 
   test('render syncs texturedMask and aoMapIds', () => {
@@ -532,7 +531,7 @@ describe('Scene render', () => {
     expect(rs.bloomEnabled).toBe(false)
   })
 
-  test('render with shadow enabled sets shadowLightViewProj and bias', () => {
+  test('render with shadow enabled sets cascadeVPs and bias', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
     scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
@@ -545,13 +544,14 @@ describe('Scene render', () => {
     scene.render()
 
     const rs = renderer.lastRenderScene!
-    expect(rs.shadowLightViewProj).toBeDefined()
-    expect(rs.shadowLightViewProj!.length).toBe(16)
+    expect(rs.shadowCascadeVPs).toBeDefined()
+    expect(rs.shadowCascadeVPs!.length).toBe(64) // 4 cascades × 16 floats
+    expect(rs.shadowCascadeCount).toBe(4)
     expect(rs.shadowBias).toBe(0.002)
-    // The VP matrix should be non-zero (a real computed matrix)
+    // The cascade VPs should be non-zero (real computed matrices)
     let nonZero = false
     for (let i = 0; i < 16; i++) {
-      if (rs.shadowLightViewProj![i] !== 0) nonZero = true
+      if (rs.shadowCascadeVPs![i] !== 0) nonZero = true
     }
     expect(nonZero).toBe(true)
   })

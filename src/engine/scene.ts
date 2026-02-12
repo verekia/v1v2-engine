@@ -10,7 +10,6 @@ import {
   m4TransformPoint,
   v3Length,
   v3Normalize,
-  v3Scale,
 } from './math.ts'
 import { findBoneNodeIndex } from './skin.ts'
 
@@ -63,26 +62,23 @@ function createDefaultOutline(): OutlineConfig {
 
 export interface ShadowConfig {
   enabled: boolean
-  /** Center of the shadow volume */
-  target: Float32Array
-  /** How far the virtual light source is from the target */
-  distance: number
-  /** Half-size of the orthographic shadow frustum */
-  extent: number
-  near: number
+  /** Number of shadow cascades (1–4). Default 4. */
+  cascades: number
+  /** Maximum shadow distance from camera. Default 200. */
   far: number
+  /** Depth bias to reduce shadow acne. Default 0.0001. */
   bias: number
+  /** Cascade split blend: 0 = uniform, 1 = logarithmic. Default 0.5. */
+  lambda: number
 }
 
 function createDefaultShadow(): ShadowConfig {
   return {
     enabled: false,
-    target: new Float32Array([0, 0, 0]),
-    distance: 400,
-    extent: 150,
-    near: 1,
-    far: 800,
+    cascades: 4,
+    far: 200,
     bias: 0.0001,
+    lambda: 0.5,
   }
 }
 
@@ -241,12 +237,16 @@ export class Scene {
   private _boneScratch = new Float32Array(16)
   private _meshIndexMap = new Map<Mesh, number>()
 
-  // Shadow scratch buffers
+  // Shadow scratch buffers (CSM)
   private _lightDirNorm = new Float32Array(3)
-  private _lightEye = new Float32Array(3)
   private _lightView = new Float32Array(16)
   private _lightProj = new Float32Array(16)
-  private _lightVP = new Float32Array(16)
+  private _cascadeVPs = new Float32Array(64) // 4 × mat4
+  private _cascadeSplits = new Float32Array(4)
+  private _frustumCorners = new Float32Array(24) // 8 × vec3
+  private _lightCorner = new Float32Array(3)
+  private _cascadeCenter = new Float32Array(3)
+  private _lightUp = new Float32Array(3)
 
   // Cached RenderScene (avoids per-frame object literal allocation)
   private _renderScene: RenderScene | null = null
@@ -644,19 +644,201 @@ export class Scene {
     rs.outlineColor = this.outline.color
     rs.outlineDistanceFactor = this.outline.distanceFactor
 
-    // Compute shadow VP if enabled
+    // Compute cascaded shadow VPs if enabled
     if (this.shadow.enabled) {
       const s = this.shadow
+      const numCascades = Math.max(1, Math.min(4, s.cascades | 0))
+      const camNear = cam.near
+      const shadowFar = Math.min(s.far, cam.far)
+
+      // Compute cascade split distances (PSSM: blend of logarithmic + uniform)
+      const splits = this._cascadeSplits
+      for (let i = 0; i < numCascades; i++) {
+        const p = (i + 1) / numCascades
+        const log = camNear * Math.pow(shadowFar / camNear, p)
+        const uni = camNear + (shadowFar - camNear) * p
+        splits[i] = s.lambda * log + (1 - s.lambda) * uni
+      }
+
+      // Compute inverse VP to unproject frustum corners
+      const invVP = this._lightProj // reuse scratch
+      m4Multiply(invVP, 0, this._projMatrix, 0, this._viewMatrix, 0)
+      m4Invert(invVP, 0, invVP, 0)
+
+      // Light view: look along light direction, centered at origin
       v3Normalize(this._lightDirNorm, 0, this.lightDirection, 0)
-      v3Scale(this._lightEye, 0, this._lightDirNorm, 0, -s.distance)
-      this._lightEye[0]! += s.target[0]!
-      this._lightEye[1]! += s.target[1]!
-      this._lightEye[2]! += s.target[2]!
-      m4LookAt(this._lightView, 0, this._lightEye, 0, s.target, 0, this.camera.up, 0)
-      this._renderer.ortho(this._lightProj, 0, -s.extent, s.extent, -s.extent, s.extent, s.near, s.far)
-      m4Multiply(this._lightVP, 0, this._lightProj, 0, this._lightView, 0)
-      rs.shadowLightViewProj = this._lightVP
+
+      // Build a stable light view basis from the light direction
+      const ld = this._lightDirNorm
+      // Pick an up vector that isn't parallel to light direction
+      const absX = Math.abs(ld[0]!),
+        absY = Math.abs(ld[1]!),
+        absZ = Math.abs(ld[2]!)
+      const lightUp = this._lightUp
+      if (absZ > absX && absZ > absY) {
+        lightUp[0] = 0
+        lightUp[1] = 1
+        lightUp[2] = 0
+      } else {
+        lightUp[0] = 0
+        lightUp[1] = 0
+        lightUp[2] = 1
+      }
+
+      for (let c = 0; c < numCascades; c++) {
+        const nearDist = c === 0 ? camNear : splits[c - 1]!
+        const farDist = splits[c]!
+
+        // Compute 8 frustum corners in NDC then unproject to world space
+        // NDC corners: x,y ∈ {-1,+1}, z ∈ {nearNDC, farNDC}
+        // For WebGPU: z ∈ [0,1], for WebGL: z ∈ [-1,1]
+        // Instead of dealing with NDC, compute frustum corners directly from camera params
+        const tanHalfFov = Math.tan(cam.fov / 2)
+        const nearH = tanHalfFov * nearDist
+        const nearW = nearH * aspect
+        const farH = tanHalfFov * farDist
+        const farW = farH * aspect
+
+        // Camera basis vectors from view matrix (column-major)
+        // View matrix: rows are right, up, -forward; columns store these transposed
+        const vm = this._viewMatrix
+        // Right = first row of view matrix = [vm[0], vm[4], vm[8]]
+        const rx = vm[0]!,
+          ry = vm[4]!,
+          rz = vm[8]!
+        // Up = second row = [vm[1], vm[5], vm[9]]
+        const ux = vm[1]!,
+          uy = vm[5]!,
+          uz = vm[9]!
+        // Forward = -third row = -[vm[2], vm[6], vm[10]]
+        const fx = -vm[2]!,
+          fy = -vm[6]!,
+          fz = -vm[10]!
+
+        const ex = cam.eye[0]!,
+          ey = cam.eye[1]!,
+          ez = cam.eye[2]!
+
+        // Near plane center & far plane center
+        const ncx = ex + fx * nearDist,
+          ncy = ey + fy * nearDist,
+          ncz = ez + fz * nearDist
+        const fcx = ex + fx * farDist,
+          fcy = ey + fy * farDist,
+          fcz = ez + fz * farDist
+
+        // 8 corners: near TL, TR, BL, BR, far TL, TR, BL, BR
+        const fc = this._frustumCorners
+        // Near top-left
+        fc[0] = ncx - rx * nearW + ux * nearH
+        fc[1] = ncy - ry * nearW + uy * nearH
+        fc[2] = ncz - rz * nearW + uz * nearH
+        // Near top-right
+        fc[3] = ncx + rx * nearW + ux * nearH
+        fc[4] = ncy + ry * nearW + uy * nearH
+        fc[5] = ncz + rz * nearW + uz * nearH
+        // Near bottom-left
+        fc[6] = ncx - rx * nearW - ux * nearH
+        fc[7] = ncy - ry * nearW - uy * nearH
+        fc[8] = ncz - rz * nearW - uz * nearH
+        // Near bottom-right
+        fc[9] = ncx + rx * nearW - ux * nearH
+        fc[10] = ncy + ry * nearW - uy * nearH
+        fc[11] = ncz + rz * nearW - uz * nearH
+        // Far top-left
+        fc[12] = fcx - rx * farW + ux * farH
+        fc[13] = fcy - ry * farW + uy * farH
+        fc[14] = fcz - rz * farW + uz * farH
+        // Far top-right
+        fc[15] = fcx + rx * farW + ux * farH
+        fc[16] = fcy + ry * farW + uy * farH
+        fc[17] = fcz + rz * farW + uz * farH
+        // Far bottom-left
+        fc[18] = fcx - rx * farW - ux * farH
+        fc[19] = fcy - ry * farW - uy * farH
+        fc[20] = fcz - rz * farW - uz * farH
+        // Far bottom-right
+        fc[21] = fcx + rx * farW - ux * farH
+        fc[22] = fcy + ry * farW - uy * farH
+        fc[23] = fcz + rz * farW - uz * farH
+
+        // Compute center of frustum slice
+        let cx = 0,
+          cy = 0,
+          cz = 0
+        for (let i = 0; i < 8; i++) {
+          cx += fc[i * 3]!
+          cy += fc[i * 3 + 1]!
+          cz += fc[i * 3 + 2]!
+        }
+        cx /= 8
+        cy /= 8
+        cz /= 8
+
+        // Bounding sphere radius of frustum slice (rotation-invariant)
+        // Using the sphere instead of a tight AABB for X/Y ensures shadow casters
+        // near but outside the camera frustum are still captured in the shadow map
+        let sphereR2 = 0
+        for (let i = 0; i < 8; i++) {
+          const dx = fc[i * 3]! - cx
+          const dy = fc[i * 3 + 1]! - cy
+          const dz = fc[i * 3 + 2]! - cz
+          const d2 = dx * dx + dy * dy + dz * dz
+          if (d2 > sphereR2) sphereR2 = d2
+        }
+        const sphereRadius = Math.sqrt(sphereR2)
+
+        // Light view: look from center - lightDir * backoff toward center
+        const backoff = farDist - nearDist + shadowFar
+        const lEx = cx - this._lightDirNorm[0]! * backoff
+        const lEy = cy - this._lightDirNorm[1]! * backoff
+        const lEz = cz - this._lightDirNorm[2]! * backoff
+        const lightEyeTmp = this._lightCorner
+        lightEyeTmp[0] = lEx
+        lightEyeTmp[1] = lEy
+        lightEyeTmp[2] = lEz
+        const centerTmp = this._cascadeCenter
+        centerTmp[0] = cx
+        centerTmp[1] = cy
+        centerTmp[2] = cz
+        m4LookAt(this._lightView, 0, lightEyeTmp, 0, centerTmp, 0, lightUp, 0)
+
+        // Transform frustum corners to light space for Z range
+        let minZ = Infinity,
+          maxZ = -Infinity
+        for (let i = 0; i < 8; i++) {
+          const wx = fc[i * 3]!,
+            wy = fc[i * 3 + 1]!,
+            wz = fc[i * 3 + 2]!
+          m4TransformPoint(this._lightCorner, 0, this._lightView, 0, wx, wy, wz)
+          const lz = this._lightCorner[2]!
+          if (lz < minZ) minZ = lz
+          if (lz > maxZ) maxZ = lz
+        }
+
+        // Extend Z range in both directions to capture shadow casters outside the camera frustum
+        // minZ: casters behind the frustum (farther from light)
+        // maxZ: casters between the light and frustum (closer to light, e.g. objects above camera)
+        minZ -= shadowFar
+        maxZ += shadowFar
+        if (maxZ > -1) maxZ = -1
+
+        // Build ortho projection for this cascade
+        // X/Y: bounding sphere ensures casters near but outside the frustum are captured
+        // Z: ortho() expects positive near/far distances; light-space Z is negative,
+        // so negate and swap: near = -maxZ, far = -minZ
+        this._renderer.ortho(this._lightProj, 0, -sphereRadius, sphereRadius, -sphereRadius, sphereRadius, -maxZ, -minZ)
+
+        // VP = proj * view
+        m4Multiply(this._cascadeVPs, c * 16, this._lightProj, 0, this._lightView, 0)
+      }
+
+      rs.shadowCascadeVPs = this._cascadeVPs
+      rs.shadowCascadeSplits = splits
+      rs.shadowCascadeCount = numCascades
       rs.shadowBias = s.bias
+    } else {
+      rs.shadowCascadeCount = 0
     }
 
     this._renderer.render(rs)
