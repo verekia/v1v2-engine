@@ -175,6 +175,10 @@ export class WebGLRenderer implements IRenderer {
   private frustumPlanes = new Float32Array(24)
   private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4)
   private lightData = new Float32Array(32) // 128 bytes
+  private shadowCamData = new Float32Array(32)
+  private _mipW = new Float64Array(BLOOM_MIPS)
+  private _mipH = new Float64Array(BLOOM_MIPS)
+  private _skinnedSlotMap = new Map<number, number>()
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -719,15 +723,22 @@ export class WebGLRenderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
-    // Extract camera eye from view matrix for distance calculations
-    const vm0 = scene.cameraView
-    const vtx = vm0[12]!,
-      vty = vm0[13]!,
-      vtz = vm0[14]!
-    const eyeX = -(vm0[0]! * vtx + vm0[1]! * vty + vm0[2]! * vtz)
-    const eyeY = -(vm0[4]! * vtx + vm0[5]! * vty + vm0[6]! * vtz)
-    const eyeZ = -(vm0[8]! * vtx + vm0[9]! * vty + vm0[10]! * vtz)
-    const outlineDF = scene.outlineDistanceFactor ?? 0
+    const hasPostprocessing = !!scene.bloomEnabled || !!scene.outlineEnabled
+    // Extract camera eye + outline distance factor only when post-processing is active
+    let eyeX = 0,
+      eyeY = 0,
+      eyeZ = 0,
+      outlineDF = 0
+    if (hasPostprocessing) {
+      const vm0 = scene.cameraView
+      const vtx = vm0[12]!,
+        vty = vm0[13]!,
+        vtz = vm0[14]!
+      eyeX = -(vm0[0]! * vtx + vm0[1]! * vty + vm0[2]! * vtz)
+      eyeY = -(vm0[4]! * vtx + vm0[5]! * vty + vm0[6]! * vtz)
+      eyeZ = -(vm0[8]! * vtx + vm0[9]! * vty + vm0[10]! * vtz)
+      outlineDF = scene.outlineDistanceFactor ?? 0
+    }
 
     // ── Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
     const modelSlot = this.modelSlot
@@ -742,21 +753,28 @@ export class WebGLRenderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
-      // bloom (float at offset 20) + bloomWhiten (float at offset 21) + outline (float at offset 22) + outlineScale (float at offset 23)
-      const bloomVal = scene.bloomValues?.[i] ?? 0
-      modelSlot[20] = bloomVal
-      modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
-      const outlineGroup = scene.outlineMask?.[i] ?? 0
-      const isOutlined = outlineGroup > 0
-      modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
-      if (isOutlined && outlineDF > 0) {
-        const dx = scene.positions[i * 3]! - eyeX
-        const dy = scene.positions[i * 3 + 1]! - eyeY
-        const dz = scene.positions[i * 3 + 2]! - eyeZ
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-        modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+      // bloom + outline (slots 20-23) — skip computation when both features disabled
+      if (hasPostprocessing) {
+        const bloomVal = scene.bloomValues?.[i] ?? 0
+        modelSlot[20] = bloomVal
+        modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+        const outlineGroup = scene.outlineMask?.[i] ?? 0
+        const isOutlined = outlineGroup > 0
+        modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
+        if (isOutlined && outlineDF > 0) {
+          const dx = scene.positions[i * 3]! - eyeX
+          const dy = scene.positions[i * 3 + 1]! - eyeY
+          const dz = scene.positions[i * 3 + 2]! - eyeZ
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+          modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+        } else {
+          modelSlot[23] = isOutlined ? 1.0 : 0.0
+        }
       } else {
-        modelSlot[23] = isOutlined ? 1.0 : 0.0
+        modelSlot[20] = 0
+        modelSlot[21] = 0
+        modelSlot[22] = 0
+        modelSlot[23] = 0
       }
 
       gl.bufferSubData(gl.UNIFORM_BUFFER, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
@@ -764,7 +782,8 @@ export class WebGLRenderer implements IRenderer {
 
     // ── Upload joint matrices ────────────────────────────────────────
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>()
+    const skinnedSlotMap = this._skinnedSlotMap
+    skinnedSlotMap.clear()
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.jointUBO)
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
@@ -783,8 +802,9 @@ export class WebGLRenderer implements IRenderer {
     // ── Shadow depth pass ─────────────────────────────────────────────
     if (hasShadow) {
       // Upload shadow camera UBO (light VP as view, identity as projection)
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1
@@ -890,16 +910,16 @@ export class WebGLRenderer implements IRenderer {
       gl.useProgram(this.bloomUpsampleProgram)
       const radius = scene.bloomRadius ?? 1
 
-      // Compute mip sizes
-      const mipW: number[] = [],
-        mipH: number[] = []
+      // Compute mip sizes (reuse scratch arrays)
+      const mipW = this._mipW
+      const mipH = this._mipH
       let tw = w,
         th = h
       for (let i = 0; i < BLOOM_MIPS; i++) {
         tw = Math.max(1, (tw / 2) | 0)
         th = Math.max(1, (th / 2) | 0)
-        mipW.push(tw)
-        mipH.push(th)
+        mipW[i] = tw
+        mipH[i] = th
       }
 
       for (let i = 0; i < BLOOM_MIPS - 1; i++) {

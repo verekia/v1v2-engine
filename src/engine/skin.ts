@@ -10,6 +10,10 @@ export interface Skeleton {
   inverseBindMatrices: Float32Array
   nodeTransforms: GltfNodeTransform[]
   traversalOrder: number[] // topological order: parents before children
+  // Pre-packed rest-pose arrays for fast bulk copy in sampleClip
+  restTranslations: Float32Array // nodeCount * 3
+  restRotations: Float32Array // nodeCount * 4
+  restScales: Float32Array // nodeCount * 3
 }
 
 export interface SkinInstance {
@@ -62,12 +66,33 @@ export function createSkeleton(skin: GltfSkin, nodeTransforms: GltfNodeTransform
   }
   for (let i = 0; i < nodeCount; i++) visit(i)
 
+  // Pre-pack rest-pose arrays for fast bulk copy in sampleClip
+  const restTranslations = new Float32Array(nodeCount * 3)
+  const restRotations = new Float32Array(nodeCount * 4)
+  const restScales = new Float32Array(nodeCount * 3)
+  for (let i = 0; i < nodeCount; i++) {
+    const nt = nodeTransforms[i]!
+    restTranslations[i * 3] = nt.translation[0]!
+    restTranslations[i * 3 + 1] = nt.translation[1]!
+    restTranslations[i * 3 + 2] = nt.translation[2]!
+    restRotations[i * 4] = nt.rotation[0]!
+    restRotations[i * 4 + 1] = nt.rotation[1]!
+    restRotations[i * 4 + 2] = nt.rotation[2]!
+    restRotations[i * 4 + 3] = nt.rotation[3]!
+    restScales[i * 3] = nt.scale[0]!
+    restScales[i * 3 + 1] = nt.scale[1]!
+    restScales[i * 3 + 2] = nt.scale[2]!
+  }
+
   return {
     jointCount: skin.jointNodeIndices.length,
     jointNodeIndices: skin.jointNodeIndices,
     inverseBindMatrices: skin.inverseBindMatrices,
     nodeTransforms,
     traversalOrder,
+    restTranslations,
+    restRotations,
+    restScales,
   }
 }
 
@@ -157,21 +182,10 @@ function sampleClip(
   outRotations: Float32Array,
   outScales: Float32Array,
 ): void {
-  // Reset to rest pose
-  const nodeCount = skeleton.nodeTransforms.length
-  for (let i = 0; i < nodeCount; i++) {
-    const nt = skeleton.nodeTransforms[i]!
-    outTranslations[i * 3] = nt.translation[0]!
-    outTranslations[i * 3 + 1] = nt.translation[1]!
-    outTranslations[i * 3 + 2] = nt.translation[2]!
-    outRotations[i * 4] = nt.rotation[0]!
-    outRotations[i * 4 + 1] = nt.rotation[1]!
-    outRotations[i * 4 + 2] = nt.rotation[2]!
-    outRotations[i * 4 + 3] = nt.rotation[3]!
-    outScales[i * 3] = nt.scale[0]!
-    outScales[i * 3 + 1] = nt.scale[1]!
-    outScales[i * 3 + 2] = nt.scale[2]!
-  }
+  // Reset to rest pose (bulk copy from pre-packed arrays)
+  outTranslations.set(skeleton.restTranslations)
+  outRotations.set(skeleton.restRotations)
+  outScales.set(skeleton.restScales)
 
   // Sample each animation channel
   for (const ch of clip.channels) {

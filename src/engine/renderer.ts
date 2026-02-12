@@ -206,6 +206,13 @@ export class Renderer implements IRenderer {
   private vpMat = new Float32Array(16)
   private frustumPlanes = new Float32Array(24) // 6 planes × 4 floats
   private lightData = new Float32Array(32) // 128 bytes for lighting UBO
+  private modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+  private shadowCamData = new Float32Array(32)
+  private compositeParams = new Float32Array(12) // 48 bytes
+  private upsampleData = new Float32Array(4)
+  private _mipW = new Float64Array(Renderer.BLOOM_MIPS)
+  private _mipH = new Float64Array(Renderer.BLOOM_MIPS)
+  private _skinnedSlotMap = new Map<number, number>()
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
@@ -1318,18 +1325,25 @@ export class Renderer implements IRenderer {
     m4ExtractFrustumPlanes(this.frustumPlanes, this.vpMat, 0)
     const planes = this.frustumPlanes
 
-    // Extract camera eye from view matrix for distance calculations
-    const vm = scene.cameraView
-    const vtx = vm[12]!,
-      vty = vm[13]!,
-      vtz = vm[14]!
-    const eyeX = -(vm[0]! * vtx + vm[1]! * vty + vm[2]! * vtz)
-    const eyeY = -(vm[4]! * vtx + vm[5]! * vty + vm[6]! * vtz)
-    const eyeZ = -(vm[8]! * vtx + vm[9]! * vty + vm[10]! * vtz)
-    const outlineDF = scene.outlineDistanceFactor ?? 0
+    const hasPostprocessing = !!scene.bloomEnabled || !!scene.outlineEnabled
+    // Extract camera eye + outline distance factor only when post-processing is active
+    let eyeX = 0,
+      eyeY = 0,
+      eyeZ = 0,
+      outlineDF = 0
+    if (hasPostprocessing) {
+      const vm = scene.cameraView
+      const vtx = vm[12]!,
+        vty = vm[13]!,
+        vtz = vm[14]!
+      eyeX = -(vm[0]! * vtx + vm[1]! * vty + vm[2]! * vtz)
+      eyeY = -(vm[4]! * vtx + vm[5]! * vty + vm[6]! * vtz)
+      eyeZ = -(vm[8]! * vtx + vm[9]! * vty + vm[10]! * vtz)
+      outlineDF = scene.outlineDistanceFactor ?? 0
+    }
 
     // Upload per-entity model data (all renderable — shadow pass needs entities outside camera frustum)
-    const modelSlot = new Float32Array(MODEL_SLOT_SIZE / 4) // 64 floats
+    const modelSlot = this.modelSlot
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.renderMask[i]) continue
 
@@ -1340,27 +1354,36 @@ export class Renderer implements IRenderer {
       modelSlot[17] = scene.colors[i * 3 + 1]!
       modelSlot[18] = scene.colors[i * 3 + 2]!
       modelSlot[19] = scene.alphas[i]!
-      const bloomVal = scene.bloomValues?.[i] ?? 0
-      modelSlot[20] = bloomVal
-      modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
-      const outlineGroup = scene.outlineMask?.[i] ?? 0
-      const isOutlined = outlineGroup > 0
-      modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
-      if (isOutlined && outlineDF > 0) {
-        const dx = scene.positions[i * 3]! - eyeX
-        const dy = scene.positions[i * 3 + 1]! - eyeY
-        const dz = scene.positions[i * 3 + 2]! - eyeZ
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-        modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+      // bloom + outline (slots 20-23) — skip computation when both features disabled
+      if (hasPostprocessing) {
+        const bloomVal = scene.bloomValues?.[i] ?? 0
+        modelSlot[20] = bloomVal
+        modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+        const outlineGroup = scene.outlineMask?.[i] ?? 0
+        const isOutlined = outlineGroup > 0
+        modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0
+        if (isOutlined && outlineDF > 0) {
+          const dx = scene.positions[i * 3]! - eyeX
+          const dy = scene.positions[i * 3 + 1]! - eyeY
+          const dz = scene.positions[i * 3 + 2]! - eyeZ
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+          modelSlot[23] = Math.min(outlineDF / Math.max(dist, 0.01), 1.0)
+        } else {
+          modelSlot[23] = isOutlined ? 1.0 : 0.0
+        }
       } else {
-        modelSlot[23] = isOutlined ? 1.0 : 0.0
+        modelSlot[20] = 0
+        modelSlot[21] = 0
+        modelSlot[22] = 0
+        modelSlot[23] = 0
       }
       device.queue.writeBuffer(this.modelBuffer, i * MODEL_SLOT_SIZE, modelSlot, 0, 24)
     }
 
     // Upload joint matrices for skinned entities
     let skinnedSlot = 0
-    const skinnedSlotMap = new Map<number, number>() // entity → slot
+    const skinnedSlotMap = this._skinnedSlotMap
+    skinnedSlotMap.clear()
     for (let i = 0; i < scene.entityCount; i++) {
       if (!scene.skinnedMask[i]) continue
       const instId = scene.skinInstanceIds[i]!
@@ -1386,9 +1409,10 @@ export class Renderer implements IRenderer {
       // Upload shadow camera (light VP into view slot, identity into proj slot)
       // Shadow depth shaders use camera.projection * camera.view * worldPos
       // We store identity in projection and lightVP in view, so result = I * lightVP * worldPos = lightVP * worldPos
-      const shadowCamData = new Float32Array(32)
+      const shadowCamData = this.shadowCamData
       for (let i = 0; i < 16; i++) shadowCamData[i] = scene.shadowLightViewProj![i]!
-      // Identity matrix for projection
+      // Identity matrix for projection — clear and set diagonal
+      for (let i = 16; i < 32; i++) shadowCamData[i] = 0
       shadowCamData[16] = 1
       shadowCamData[21] = 1
       shadowCamData[26] = 1
@@ -1508,14 +1532,14 @@ export class Renderer implements IRenderer {
       const radius = scene.bloomRadius ?? 1
       let uw = canvasTex.width,
         uh = canvasTex.height
-      // Compute mip sizes
-      const mipW: number[] = [],
-        mipH: number[] = []
+      // Compute mip sizes (reuse scratch arrays)
+      const mipW = this._mipW
+      const mipH = this._mipH
       for (let i = 0; i < MIPS; i++) {
         uw = Math.max(1, (uw / 2) | 0)
         uh = Math.max(1, (uh / 2) | 0)
-        mipW.push(uw)
-        mipH.push(uh)
+        mipW[i] = uw
+        mipH[i] = uh
       }
       for (let i = 0; i < MIPS - 1; i++) {
         const srcIdx = MIPS - 1 - i // source mip (lower res)
@@ -1524,8 +1548,12 @@ export class Renderer implements IRenderer {
           destH = mipH[dstIdx]!
         const srcW = mipW[srcIdx]!,
           srcH = mipH[srcIdx]!
-        const data = new Float32Array([1 / destW, 1 / destH, radius / srcW, radius / srcH])
-        device.queue.writeBuffer(this.bloomUpsampleParams[i]!, 0, data.buffer as ArrayBuffer, 0, 16)
+        const data = this.upsampleData
+        data[0] = 1 / destW
+        data[1] = 1 / destH
+        data[2] = radius / srcW
+        data[3] = radius / srcH
+        device.queue.writeBuffer(this.bloomUpsampleParams[i]!, 0, data.buffer as ArrayBuffer, data.byteOffset, 16)
       }
 
       // Upsample chain: mip[N-1] → mip[N-2] → ... → mip[0] (additive blend)
@@ -1541,7 +1569,7 @@ export class Renderer implements IRenderer {
       }
 
       // Composite: sceneTexture + mip[0] (accumulated bloom) + outline → canvas
-      const compositeParams = new Float32Array(12) // 48 bytes
+      const compositeParams = this.compositeParams
       compositeParams[0] = scene.bloomIntensity ?? 1
       compositeParams[1] = scene.bloomThreshold ?? 0
       compositeParams[2] = scene.outlineEnabled ? (scene.outlineThickness ?? 3) : 0
@@ -1554,7 +1582,13 @@ export class Renderer implements IRenderer {
       compositeParams[9] = 1 / canvasTex.height
       compositeParams[10] = 0 // pad
       compositeParams[11] = 0 // pad
-      device.queue.writeBuffer(this.bloomCompositeParamsBuffer, 0, compositeParams.buffer as ArrayBuffer, 0, 48)
+      device.queue.writeBuffer(
+        this.bloomCompositeParamsBuffer,
+        0,
+        compositeParams.buffer as ArrayBuffer,
+        compositeParams.byteOffset,
+        48,
+      )
       const compositePass = encoder.beginRenderPass({
         colorAttachments: [
           {

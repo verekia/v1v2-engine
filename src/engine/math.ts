@@ -115,17 +115,42 @@ export function m4Multiply(
     a32 = a[ao + 14]!,
     a33 = a[ao + 15]!
 
-  for (let i = 0; i < 4; i++) {
-    const bi = bo + i * 4
-    const b0 = b[bi]!,
-      b1 = b[bi + 1]!,
-      b2 = b[bi + 2]!,
-      b3 = b[bi + 3]!
-    out[o + i * 4] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
-    out[o + i * 4 + 1] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
-    out[o + i * 4 + 2] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
-    out[o + i * 4 + 3] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
-  }
+  // Column 0
+  let b0 = b[bo]!,
+    b1 = b[bo + 1]!,
+    b2 = b[bo + 2]!,
+    b3 = b[bo + 3]!
+  out[o] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
+  out[o + 1] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
+  out[o + 2] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
+  out[o + 3] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
+  // Column 1
+  b0 = b[bo + 4]!
+  b1 = b[bo + 5]!
+  b2 = b[bo + 6]!
+  b3 = b[bo + 7]!
+  out[o + 4] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
+  out[o + 5] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
+  out[o + 6] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
+  out[o + 7] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
+  // Column 2
+  b0 = b[bo + 8]!
+  b1 = b[bo + 9]!
+  b2 = b[bo + 10]!
+  b3 = b[bo + 11]!
+  out[o + 8] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
+  out[o + 9] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
+  out[o + 10] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
+  out[o + 11] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
+  // Column 3
+  b0 = b[bo + 12]!
+  b1 = b[bo + 13]!
+  b2 = b[bo + 14]!
+  b3 = b[bo + 15]!
+  out[o + 12] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
+  out[o + 13] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
+  out[o + 14] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
+  out[o + 15] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
 }
 
 export function m4Perspective(
