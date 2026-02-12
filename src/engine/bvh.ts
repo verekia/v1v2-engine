@@ -1,7 +1,7 @@
 // BVH acceleration structure for raycasting.
 // SAH-binned build, flat-array storage, stack-based traversal — zero allocation in the hot path.
 
-const STRIDE = 9 // interleaved vertex stride: px,py,pz, nx,ny,nz, cr,cg,cb
+const STRIDE = 10 // interleaved vertex stride: px,py,pz, nx,ny,nz, cr,cg,cb, bloom
 const NODE_FLOATS = 8
 // Node layout (8 floats):
 //   [0–2] AABB min (x,y,z)

@@ -4,7 +4,7 @@ import { quatToEulerZXY } from './math.ts'
 
 export interface GltfMesh {
   name: string
-  vertices: Float32Array // interleaved [px,py,pz, nx,ny,nz, cr,cg,cb]
+  vertices: Float32Array // interleaved [px,py,pz, nx,ny,nz, cr,cg,cb, bloom]
   indices: Uint16Array | Uint32Array
   position: [number, number, number]
   rotation: [number, number, number] // euler ZXY
@@ -436,10 +436,10 @@ function decodeDracoPrimitive(
     draco.destroy(weightsArray)
   }
 
-  // Interleave [px, py, pz, nx, ny, nz, cr, cg, cb]
-  const vertices = new Float32Array(numVertices * 9)
+  // Interleave [px, py, pz, nx, ny, nz, cr, cg, cb, bloom]
+  const vertices = new Float32Array(numVertices * 10)
   for (let i = 0; i < numVertices; i++) {
-    const vi = i * 9
+    const vi = i * 10
     vertices[vi] = posArray.GetValue(i * 3)
     vertices[vi + 1] = posArray.GetValue(i * 3 + 1)
     vertices[vi + 2] = posArray.GetValue(i * 3 + 2)
@@ -462,6 +462,7 @@ function decodeDracoPrimitive(
       vertices[vi + 7] = 1
       vertices[vi + 8] = 1
     }
+    // vertices[vi + 9] = 0  // bloom (Float32Array default)
   }
 
   // Read indices
@@ -514,9 +515,9 @@ function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): Pr
   }
 
   const numVertices = posAccessor.count as number
-  const vertices = new Float32Array(numVertices * 9)
+  const vertices = new Float32Array(numVertices * 10)
   for (let i = 0; i < numVertices; i++) {
-    const vi = i * 9
+    const vi = i * 10
     vertices[vi] = positions[i * 3]!
     vertices[vi + 1] = positions[i * 3 + 1]!
     vertices[vi + 2] = positions[i * 3 + 2]!
@@ -531,6 +532,7 @@ function decodeStandardPrimitive(primitive: any, gltf: any, bin: Uint8Array): Pr
     vertices[vi + 6] = 1
     vertices[vi + 7] = 1
     vertices[vi + 8] = 1
+    // vertices[vi + 9] = 0  // bloom (Float32Array default)
   }
 
   // Read TEXCOORD_0 if present

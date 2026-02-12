@@ -182,7 +182,7 @@ scene.destroy() // clean up GPU resources
 
 ### Geometry format:
 
-Interleaved vertex data: `[px, py, pz, nx, ny, nz, cr, cg, cb]` per vertex (stride 36 bytes). Vertex colors are multiplied with the per-entity uniform color in the fragment shader — set vertex colors to white `[1,1,1]` for uniform-only coloring, or set uniform color to white for vertex-color-only coloring. GLB meshes loaded via `loadGlb()` support both uint16 and uint32 index buffers. `mergeGeometries()` merges multiple primitives into a single geometry, baking per-primitive colors into vertex RGB.
+Interleaved vertex data: `[px, py, pz, nx, ny, nz, cr, cg, cb, bloom]` per vertex (stride 40 bytes). Vertex colors are multiplied with the per-entity uniform color in the fragment shader — set vertex colors to white `[1,1,1]` for uniform-only coloring, or set uniform color to white for vertex-color-only coloring. The per-vertex `bloom` float enables marking specific parts of a mesh as emissive without splitting it — the shader uses `max(vertexBloom, mesh.bloom)` so both per-vertex and per-mesh bloom work together. GLB meshes loaded via `loadGlb()` support both uint16 and uint32 index buffers. `mergeGeometries()` merges multiple primitives into a single geometry, baking per-primitive colors and optional `bloom` values into vertex data.
 
 ### Renderer limits:
 
