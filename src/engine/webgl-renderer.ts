@@ -469,15 +469,18 @@ export class WebGLRenderer implements IRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW)
 
-    // position (location 0): 3 floats at offset 0, stride 36
+    // position (location 0): 3 floats at offset 0, stride 40
     gl.enableVertexAttribArray(0)
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0)
     // normal (location 1): 3 floats at offset 12
     gl.enableVertexAttribArray(1)
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12)
     // color (location 2): 3 floats at offset 24
     gl.enableVertexAttribArray(2)
-    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 40, 24)
+    // bloom (location 3): 1 float at offset 36
+    gl.enableVertexAttribArray(3)
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36)
 
     // IBO
     const ibo = gl.createBuffer()!
@@ -488,7 +491,7 @@ export class WebGLRenderer implements IRenderer {
 
     // Bounding sphere
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -519,17 +522,19 @@ export class WebGLRenderer implements IRenderer {
     const vao = gl.createVertexArray()!
     gl.bindVertexArray(vao)
 
-    // VBO 0: position/normal/color (stride 36)
+    // VBO 0: position/normal/color/bloom (stride 40)
     const vbo = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW)
 
     gl.enableVertexAttribArray(0)
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0)
     gl.enableVertexAttribArray(1)
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12)
     gl.enableVertexAttribArray(2)
-    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 40, 24)
+    gl.enableVertexAttribArray(3)
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36)
 
     // VBO 1: interleaved joints (uint8x4) + weights (float32x4) = 20 bytes per vertex
     const numVertices = joints.length / 4
@@ -551,12 +556,12 @@ export class WebGLRenderer implements IRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, skinVbo)
     gl.bufferData(gl.ARRAY_BUFFER, skinData, gl.STATIC_DRAW)
 
-    // joints (location 3): uint8x4, use vertexAttribIPointer for integer attribs
-    gl.enableVertexAttribArray(3)
-    gl.vertexAttribIPointer(3, 4, gl.UNSIGNED_BYTE, 20, 0)
-    // weights (location 4): float32x4
+    // joints (location 4): uint8x4, use vertexAttribIPointer for integer attribs
     gl.enableVertexAttribArray(4)
-    gl.vertexAttribPointer(4, 4, gl.FLOAT, false, 20, 4)
+    gl.vertexAttribIPointer(4, 4, gl.UNSIGNED_BYTE, 20, 0)
+    // weights (location 5): float32x4
+    gl.enableVertexAttribArray(5)
+    gl.vertexAttribPointer(5, 4, gl.FLOAT, false, 20, 4)
 
     // IBO
     const ibo = gl.createBuffer()!
@@ -567,7 +572,7 @@ export class WebGLRenderer implements IRenderer {
 
     // Bounding sphere
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -598,25 +603,27 @@ export class WebGLRenderer implements IRenderer {
     const vao = gl.createVertexArray()!
     gl.bindVertexArray(vao)
 
-    // VBO 0: position/normal/color (stride 36)
+    // VBO 0: position/normal/color/bloom (stride 40)
     const vbo = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW)
 
     gl.enableVertexAttribArray(0)
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0)
     gl.enableVertexAttribArray(1)
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12)
     gl.enableVertexAttribArray(2)
-    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 40, 24)
+    gl.enableVertexAttribArray(3)
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36)
 
     // VBO 1: UVs (float32x2 = 8 bytes per vertex)
     const uvVbo = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, uvVbo)
     gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW)
 
-    gl.enableVertexAttribArray(3)
-    gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 8, 0)
+    gl.enableVertexAttribArray(4)
+    gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 8, 0)
 
     // IBO
     const ibo = gl.createBuffer()!
@@ -627,7 +634,7 @@ export class WebGLRenderer implements IRenderer {
 
     // Bounding sphere
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -652,11 +659,13 @@ export class WebGLRenderer implements IRenderer {
     gl.bindVertexArray(shadowVao)
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo) // reuse same VBO
     gl.enableVertexAttribArray(0)
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0)
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0)
     gl.enableVertexAttribArray(1)
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12)
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12)
     gl.enableVertexAttribArray(2)
-    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24)
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 40, 24)
+    gl.enableVertexAttribArray(3)
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36)
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo) // reuse same IBO
     gl.bindVertexArray(null)
 
@@ -770,7 +779,7 @@ export class WebGLRenderer implements IRenderer {
       if (hasPostprocessing) {
         const bloomVal = scene.bloomValues?.[i] ?? 0
         modelSlot[20] = bloomVal
-        modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+        modelSlot[21] = scene.bloomWhiten ?? 0
         const outlineGroup = scene.outlineMask?.[i] ?? 0
         const isOutlined = outlineGroup > 0
         modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0

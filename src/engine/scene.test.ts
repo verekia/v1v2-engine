@@ -176,7 +176,7 @@ describe('Scene geometry management', () => {
   test('registerGeometry returns sequential IDs and delegates to renderer', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    const v = new Float32Array(9)
+    const v = new Float32Array(10)
     const i16 = new Uint16Array(3)
 
     const id0 = scene.registerGeometry(v, i16)
@@ -192,7 +192,7 @@ describe('Scene geometry management', () => {
   test('registerSkinnedGeometry returns sequential IDs (shared counter)', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    const v = new Float32Array(9)
+    const v = new Float32Array(10)
     const idx = new Uint16Array(3)
     const j = new Uint8Array(4)
     const w = new Float32Array(4)
@@ -209,7 +209,7 @@ describe('Scene geometry management', () => {
   test('registerTexturedGeometry returns sequential IDs (shared counter)', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    const v = new Float32Array(9)
+    const v = new Float32Array(10)
     const idx = new Uint16Array(3)
     const uvs = new Float32Array(6)
 
@@ -354,7 +354,7 @@ describe('Scene render', () => {
   test('render calls renderer.render with correct entity count', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0, position: [1, 2, 3], color: [1, 0, 0] }))
     scene.add(new Mesh({ geometry: 0, position: [4, 5, 6], color: [0, 1, 0] }))
 
@@ -368,7 +368,7 @@ describe('Scene render', () => {
   test('render syncs mesh positions into SoA arrays', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0, position: [10, 20, 30] }))
 
     scene.render()
@@ -382,7 +382,7 @@ describe('Scene render', () => {
   test('render syncs colors and alpha', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0, color: [0.5, 0.6, 0.7], alpha: 0.3 }))
 
     scene.render()
@@ -397,7 +397,7 @@ describe('Scene render', () => {
   test('render sets renderMask=0 for invisible meshes', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     const m = scene.add(new Mesh({ geometry: 0 }))
     m.visible = false
 
@@ -410,7 +410,7 @@ describe('Scene render', () => {
   test('render sets unlitMask and skinnedMask correctly', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0, unlit: true }))
     scene.add(new Mesh({ geometry: 0, skinned: true }))
 
@@ -426,7 +426,7 @@ describe('Scene render', () => {
   test('render computes view matrix from camera', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
 
     scene.camera.eye.set([0, -10, 5])
@@ -448,7 +448,7 @@ describe('Scene render', () => {
     const renderer = createMockRenderer()
     const canvas = createMockCanvas(800, 400) // aspect = 2.0
     const scene = new Scene(renderer, canvas, 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
 
     scene.camera.fov = Math.PI / 4
@@ -469,7 +469,7 @@ describe('Scene render', () => {
   test('render without shadow does not set cascadeCount', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
     scene.shadow.enabled = false
 
@@ -482,7 +482,7 @@ describe('Scene render', () => {
   test('render syncs texturedMask and aoMapIds', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
     scene.add(new Mesh({ geometry: 0, aoMap: 2 }))
 
@@ -498,7 +498,7 @@ describe('Scene render', () => {
   test('render syncs bloom values and bloom config into RenderScene', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
     scene.add(new Mesh({ geometry: 0, bloom: 1.5 }))
 
@@ -522,7 +522,7 @@ describe('Scene render', () => {
   test('render without bloom sets bloomEnabled false', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
 
     scene.render()
@@ -534,7 +534,7 @@ describe('Scene render', () => {
   test('render with shadow enabled sets cascadeVPs and bias', () => {
     const renderer = createMockRenderer()
     const scene = new Scene(renderer, createMockCanvas(), 100)
-    scene.registerGeometry(new Float32Array(9), new Uint16Array(3))
+    scene.registerGeometry(new Float32Array(10), new Uint16Array(3))
     scene.add(new Mesh({ geometry: 0 }))
 
     scene.setDirectionalLight([-1, -1, -2], [0.5, 0.5, 0.5])

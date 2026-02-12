@@ -300,11 +300,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
         ],
@@ -331,11 +332,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36, // 9 floats * 4 bytes
+            arrayStride: 40, // 10 floats * 4 bytes
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
               { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
               { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
+              { shaderLocation: 3, offset: 36, format: 'float32' }, // bloom
             ],
           },
         ],
@@ -362,18 +364,19 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
               { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
               { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
+              { shaderLocation: 3, offset: 36, format: 'float32' }, // bloom
             ],
           },
           {
             arrayStride: 20, // 4 bytes joints + 16 bytes weights
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' }, // joints
-              { shaderLocation: 4, offset: 4, format: 'float32x4' }, // weights
+              { shaderLocation: 4, offset: 0, format: 'uint8x4' }, // joints
+              { shaderLocation: 5, offset: 4, format: 'float32x4' }, // weights
             ],
           },
         ],
@@ -406,16 +409,17 @@ export class Renderer implements IRenderer {
 
     const texturedVertexBuffers: GPUVertexBufferLayout[] = [
       {
-        arrayStride: 36,
+        arrayStride: 40,
         attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x3' },
           { shaderLocation: 2, offset: 24, format: 'float32x3' },
+          { shaderLocation: 3, offset: 36, format: 'float32' },
         ],
       },
       {
         arrayStride: 8,
-        attributes: [{ shaderLocation: 3, offset: 0, format: 'float32x2' }],
+        attributes: [{ shaderLocation: 4, offset: 0, format: 'float32x2' }],
       },
     ]
 
@@ -453,11 +457,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
         ],
@@ -483,18 +488,19 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
           {
             arrayStride: 20,
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
-              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+              { shaderLocation: 4, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 5, offset: 4, format: 'float32x4' },
             ],
           },
         ],
@@ -549,11 +555,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
         ],
@@ -571,11 +578,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
         ],
@@ -593,18 +601,19 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
           {
             arrayStride: 20,
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
-              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+              { shaderLocation: 4, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 5, offset: 4, format: 'float32x4' },
             ],
           },
         ],
@@ -631,11 +640,12 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
         ],
@@ -653,18 +663,19 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' },
               { shaderLocation: 1, offset: 12, format: 'float32x3' },
               { shaderLocation: 2, offset: 24, format: 'float32x3' },
+              { shaderLocation: 3, offset: 36, format: 'float32' },
             ],
           },
           {
             arrayStride: 20,
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
-              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+              { shaderLocation: 4, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 5, offset: 4, format: 'float32x4' },
             ],
           },
         ],
@@ -700,7 +711,7 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position only
             ],
@@ -718,14 +729,14 @@ export class Renderer implements IRenderer {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 36,
+            arrayStride: 40,
             attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
           },
           {
             arrayStride: 20,
             attributes: [
-              { shaderLocation: 3, offset: 0, format: 'uint8x4' },
-              { shaderLocation: 4, offset: 4, format: 'float32x4' },
+              { shaderLocation: 4, offset: 0, format: 'uint8x4' },
+              { shaderLocation: 5, offset: 4, format: 'float32x4' },
             ],
           },
         ],
@@ -1098,9 +1109,9 @@ export class Renderer implements IRenderer {
     indexCopy.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength))
     this.device.queue.writeBuffer(indexBuffer, 0, indexCopy.buffer as ArrayBuffer, 0, indexByteSize)
 
-    // Compute bounding sphere radius from vertex positions (stride = 9 floats)
+    // Compute bounding sphere radius from vertex positions (stride = 10 floats)
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -1167,7 +1178,7 @@ export class Renderer implements IRenderer {
 
     // Bounding sphere
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -1220,7 +1231,7 @@ export class Renderer implements IRenderer {
 
     // Bounding sphere
     let maxR2 = 0
-    for (let i = 0; i < vertices.length; i += 9) {
+    for (let i = 0; i < vertices.length; i += 10) {
       const x = vertices[i]!,
         y = vertices[i + 1]!,
         z = vertices[i + 2]!
@@ -1373,7 +1384,7 @@ export class Renderer implements IRenderer {
       if (hasPostprocessing) {
         const bloomVal = scene.bloomValues?.[i] ?? 0
         modelSlot[20] = bloomVal
-        modelSlot[21] = bloomVal * (scene.bloomWhiten ?? 0)
+        modelSlot[21] = scene.bloomWhiten ?? 0
         const outlineGroup = scene.outlineMask?.[i] ?? 0
         const isOutlined = outlineGroup > 0
         modelSlot[22] = isOutlined ? (((outlineGroup * 37 + 1) % 255) + 1) / 255.0 : 0.0

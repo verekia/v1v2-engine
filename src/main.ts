@@ -14,40 +14,10 @@ import {
   createRaycastHit,
   HtmlOverlay,
   HtmlElement,
+  Scheduler,
 } from './engine/index.ts'
 
 import type { BackendType } from './engine/index.ts'
-
-function splitByMaterial(
-  vertices: Float32Array,
-  indices: Uint16Array | Uint32Array,
-  materialIndices: Uint8Array,
-  matchFn: (matIdx: number) => boolean,
-): { vertices: Float32Array; indices: Uint16Array | Uint32Array } | null {
-  const vertexMap = new Map<number, number>()
-  const newVerts: number[] = []
-  const newIdx: number[] = []
-
-  for (let f = 0; f < indices.length; f += 3) {
-    const i0 = indices[f]!
-    if (!matchFn(materialIndices[i0]!)) continue
-    for (let k = 0; k < 3; k++) {
-      const oldIdx = indices[f + k]!
-      if (!vertexMap.has(oldIdx)) {
-        const newI = vertexMap.size
-        vertexMap.set(oldIdx, newI)
-        for (let j = 0; j < 9; j++) newVerts.push(vertices[oldIdx * 9 + j]!)
-      }
-      newIdx.push(vertexMap.get(oldIdx)!)
-    }
-  }
-
-  if (newIdx.length === 0) return null
-  return {
-    vertices: new Float32Array(newVerts),
-    indices: newIdx.length <= 65535 ? new Uint16Array(newIdx) : new Uint32Array(newIdx),
-  }
-}
 
 const MOVE_SPEED = 3
 const UP: [number, number, number] = [0, 0, 1]
@@ -161,74 +131,47 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const { meshes: glbMeshes } = await loadGlb('/static-bundle.glb', '/draco-1.5.7/', megaxeColors)
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
   let axeMesh: Mesh | undefined
-  let axeBloomMesh: Mesh | undefined
-  let axeBaseGeo: number | undefined
-  let axeGlowGeo: number | undefined
+  let axeGeo: number | undefined
   if (megaxe) {
+    // Stamp per-vertex bloom based on material index (material 2 = glow)
     if (megaxe.materialIndices) {
-      // Split: non-bloom materials (0,1) and bloom material (2)
-      const base = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx !== 2)
-      const glow = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx === 2)
-      if (base) {
-        axeBaseGeo = scene.registerGeometry(base.vertices, base.indices)
-        axeMesh = scene.add(
-          new Mesh({
-            geometry: axeBaseGeo,
-            position: [0, 0.3, 0],
-            rotation: [0, 0, Math.PI],
-            scale: megaxe.scale,
-            color: [1, 1, 1],
-            outline: 1,
-          }),
-        )
+      const vCount = megaxe.vertices.length / 10
+      for (let v = 0; v < vCount; v++) {
+        if (megaxe.materialIndices[v] === 2) {
+          megaxe.vertices[v * 10 + 9] = 1.0
+        }
       }
-      if (glow) {
-        axeGlowGeo = scene.registerGeometry(glow.vertices, glow.indices)
-        axeBloomMesh = scene.add(
-          new Mesh({
-            geometry: axeGlowGeo,
-            position: [0, 0.3, 0],
-            rotation: [0, 0, Math.PI],
-            scale: megaxe.scale,
-            color: [1, 1, 1],
-            bloom: 1.0,
-            outline: 1,
-          }),
-        )
-      }
-    } else {
-      axeBaseGeo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
-      axeMesh = scene.add(
-        new Mesh({
-          geometry: axeBaseGeo,
-          position: [0, 0.3, 0],
-          rotation: [0, 0, Math.PI],
-          scale: megaxe.scale,
-          color: [1, 1, 1],
-          outline: 1,
-        }),
-      )
     }
+    axeGeo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
+    axeMesh = scene.add(
+      new Mesh({
+        geometry: axeGeo,
+        position: [0, 0.3, 0],
+        rotation: [0, 0, Math.PI],
+        scale: megaxe.scale,
+        color: [1, 1, 1],
+        outline: 1,
+      }),
+    )
   }
 
   // ── Load AO texture ──────────────────────────────────────────────────
   const aoTex = await loadKTX2('/city-ao.ktx2', '/basis-1.50/')
   const aoTexId = scene.registerTexture(aoTex.data, aoTex.width, aoTex.height)
 
-  // ── Eden (merged into 1 draw call with AO map, bloom meshes kept separate) ──
+  // ── Eden (all merged into 1 draw call with AO map, per-vertex bloom for Eden_24) ──
   const edenBloomNames = new Set(['Eden_24'])
   const edenMeshes = glbMeshes.filter(m => m.name.startsWith('Eden_'))
-  const edenNonBloom = edenMeshes.filter(m => !edenBloomNames.has(m.name))
-  const edenBloom = edenMeshes.filter(m => edenBloomNames.has(m.name))
   const edenScale = edenMeshes[0]?.scale
 
   let edenWorldMesh: Mesh | undefined
-  if (edenNonBloom.length > 0) {
+  if (edenMeshes.length > 0) {
     const merged = mergeGeometries(
-      edenNonBloom.map(em => ({
+      edenMeshes.map(em => ({
         vertices: em.vertices,
         indices: em.indices,
         color: EDEN_COLORS[em.name] ?? [1, 1, 1],
+        bloom: edenBloomNames.has(em.name) ? 1.0 : undefined,
         uvs: em.uvs,
       })),
     )
@@ -252,20 +195,6 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     }
     // Pre-build BVH for ground raycasting
     scene.buildBVH(edenWorldMesh.geometry)
-  }
-
-  for (const em of edenBloom) {
-    const geo = scene.registerGeometry(em.vertices, em.indices)
-    scene.add(
-      new Mesh({
-        geometry: geo,
-        position: [0, 0, 0],
-        scale: edenScale,
-        color: EDEN_COLORS[em.name] ?? [1, 1, 1],
-        bloom: 1.0,
-        outline: 2,
-      }),
-    )
   }
 
   // ── Load player GLB ───────────────────────────────────────────────────
@@ -324,7 +253,6 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     // Attach megaxe to player's right hand bone
     if (axeMesh) scene.attachToBone(axeMesh, player, 'Hand.R')
-    if (axeBloomMesh) scene.attachToBone(axeBloomMesh, player, 'Hand.R')
 
     // ── NPC grid ──────────────────────────────────────────────────────
     if (edenWorldMesh) {
@@ -367,11 +295,11 @@ export async function startDemo(canvas: HTMLCanvasElement) {
             }),
           )
 
-          // Axe (base)
-          if (axeBaseGeo !== undefined) {
+          // Axe
+          if (axeGeo !== undefined) {
             const npcAxe = scene.add(
               new Mesh({
-                geometry: axeBaseGeo,
+                geometry: axeGeo,
                 position: [0, 0.3, 0],
                 rotation: [0, 0, Math.PI],
                 scale: megaxe!.scale,
@@ -379,21 +307,6 @@ export async function startDemo(canvas: HTMLCanvasElement) {
               }),
             )
             scene.attachToBone(npcAxe, npcBody, 'Hand.R')
-          }
-
-          // Axe (bloom)
-          if (axeGlowGeo !== undefined) {
-            const npcAxeGlow = scene.add(
-              new Mesh({
-                geometry: axeGlowGeo,
-                position: [0, 0.3, 0],
-                rotation: [0, 0, Math.PI],
-                scale: megaxe!.scale,
-                color: [1, 1, 1],
-                bloom: 1.0,
-              }),
-            )
-            scene.attachToBone(npcAxeGlow, npcBody, 'Hand.R')
           }
 
           // Animation cycle callback (staggered timer)
@@ -471,7 +384,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   }, 500)
 
   // ── Backend toggle ────────────────────────────────────────────────────
-  let switching = false
+  let scheduler: Scheduler
   let resizeObs: ResizeObserver
 
   function observeResize() {
@@ -492,7 +405,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
   async function switchBackend(type: BackendType) {
     if (scene.backendType === type) return
-    switching = true
+    scheduler.stop()
 
     const { theta, phi, radius, targetX, targetY, targetZ } = orbit
     orbit.destroy()
@@ -527,7 +440,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     }
 
     observeResize()
-    switching = false
+    scheduler.start()
   }
 
   // ── Controls panel (top-right) ──────────────────────────────────────
@@ -580,33 +493,62 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     })
   }
 
+  // FPS cap slider
+  {
+    const row = document.createElement('div')
+    row.style.cssText = 'display:flex;align-items:center;gap:6px'
+    const slider = document.createElement('input')
+    slider.type = 'range'
+    slider.id = 'fps-slider'
+    slider.min = '30'
+    slider.max = '120'
+    slider.value = '60'
+    slider.style.cssText = 'cursor:pointer;width:80px'
+    const lbl = document.createElement('label')
+    lbl.htmlFor = 'fps-slider'
+    lbl.textContent = 'Max FPS: 60'
+    lbl.style.cssText = 'cursor:pointer'
+    row.appendChild(slider)
+    row.appendChild(lbl)
+    controls.appendChild(row)
+    slider.addEventListener('input', () => {
+      const fps = Number(slider.value)
+      lbl.textContent = `Max FPS: ${fps}`
+      scheduler.maxFps = fps
+    })
+  }
+
   observeResize()
 
   // ── Raycast receiver (reused every frame — no allocations) ──────────
   const rayHit = createRaycastHit()
   const edenFilter = edenWorldMesh ? ([edenWorldMesh] as readonly Mesh[]) : undefined
 
-  // ── Game loop ─────────────────────────────────────────────────────────
-  let lastTime = performance.now()
+  // ── Scheduler ─────────────────────────────────────────────────────────
+  scheduler = new Scheduler(scene)
+  scheduler.maxFps = 60
 
-  function loop(now: number) {
-    if (switching) {
-      requestAnimationFrame(loop)
-      return
-    }
-    const dt = Math.min((now - lastTime) / 1000, 0.1)
-    lastTime = now
+  // Input (runs first)
+  scheduler.register(
+    ({ dt }) => {
+      if (player) {
+        if (keys.has('KeyW')) player.position[1]! += MOVE_SPEED * dt
+        if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
+        if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
+        if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
+      }
+      for (const cube of cubes) cube.rotation[2]! += dt
+      for (const cb of animCycleCallbacks) cb(dt)
+      for (const inst of scene.skinInstances) updateSkinInstance(inst, playerResult.animations, dt)
+    },
+    { priority: -2 },
+  )
 
-    // Input
-    if (player) {
-      if (keys.has('KeyW')) player.position[1]! += MOVE_SPEED * dt
-      if (keys.has('KeyS')) player.position[1]! -= MOVE_SPEED * dt
-      if (keys.has('KeyA')) player.position[0]! -= MOVE_SPEED * dt
-      if (keys.has('KeyD')) player.position[0]! += MOVE_SPEED * dt
-
-      // Snap player to ground via downward raycast against Eden world
-      if (edenFilter) {
-        const hit = scene.raycast(
+  // Raycast (runs after input)
+  scheduler.register(
+    ({ scene: s }) => {
+      if (player && edenFilter) {
+        const hit = s.raycast(
           player.position[0]!,
           player.position[1]!,
           player.position[2]! + 50,
@@ -620,25 +562,21 @@ export async function startDemo(canvas: HTMLCanvasElement) {
           player.position[2] = rayHit.pointZ
         }
       }
-    }
+      s.camera.eye.set(orbit.eye)
+      s.camera.target.set(orbit.target)
+    },
+    { priority: -1 },
+  )
 
-    // Rotate cubes
-    for (const cube of cubes) cube.rotation[2]! += dt
+  // Render (runs last)
+  scheduler.register(
+    ({ scene: s }) => {
+      s.render()
+      overlay.update(s)
+      frames++
+    },
+    { priority: 0 },
+  )
 
-    // Animations
-    for (const cb of animCycleCallbacks) cb(dt)
-    for (const inst of scene.skinInstances) updateSkinInstance(inst, playerResult.animations, dt)
-
-    // Camera — feed orbit controls into scene camera
-    scene.camera.eye.set(orbit.eye)
-    scene.camera.target.set(orbit.target)
-
-    // Render
-    scene.render()
-    overlay.update(scene)
-    frames++
-    requestAnimationFrame(loop)
-  }
-
-  requestAnimationFrame(loop)
+  scheduler.start()
 }

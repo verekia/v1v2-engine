@@ -27,16 +27,19 @@ layout(std140) uniform Lighting {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec3 color;
+layout(location = 3) in float bloom;
 
 out vec3 vWorldNorm;
 out vec3 vVertColor;
 out vec3 vWorldPos;
+out float vVertBloom;
 
 void main() {
   vec4 worldPos = model.world * vec4(position, 1.0);
   gl_Position = camera.projection * camera.view * worldPos;
   vWorldNorm = (model.world * vec4(normal, 0.0)).xyz;
   vVertColor = color;
+  vVertBloom = bloom;
   vWorldPos = worldPos.xyz;
 }
 `
@@ -73,6 +76,7 @@ uniform sampler2DShadow uShadowMap;
 in vec3 vWorldNorm;
 in vec3 vVertColor;
 in vec3 vWorldPos;
+in float vVertBloom;
 
 out vec4 fragColor;
 
@@ -177,6 +181,7 @@ uniform sampler2DShadow uShadowMap;
 in vec3 vWorldNorm;
 in vec3 vVertColor;
 in vec3 vWorldPos;
+in float vVertBloom;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 bloomColor;
@@ -248,8 +253,9 @@ void main() {
   vec3 ambient = lighting.ambientColor.rgb;
   vec3 finalColor = model.color.rgb * vVertColor * (diffuse + ambient);
   vec4 c = vec4(finalColor, model.color.a);
-  fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
-  bloomColor = vec4(c.rgb * model.bloom, c.a);
+  float bloomVal = max(vVertBloom, model.bloom);
+  fragColor = vec4(mix(c.rgb, vec3(1.0), bloomVal * model.bloomWhiten), c.a);
+  bloomColor = vec4(c.rgb * bloomVal, c.a);
   outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
@@ -274,13 +280,16 @@ layout(std140) uniform Model {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec3 color;
+layout(location = 3) in float bloom;
 
 out vec3 vVertColor;
+out float vVertBloom;
 
 void main() {
   vec4 worldPos = model.world * vec4(position, 1.0);
   gl_Position = camera.projection * camera.view * worldPos;
   vVertColor = color;
+  vVertBloom = bloom;
 }
 `
 
@@ -297,6 +306,7 @@ layout(std140) uniform Model {
 } model;
 
 in vec3 vVertColor;
+in float vVertBloom;
 
 out vec4 fragColor;
 
@@ -318,6 +328,7 @@ layout(std140) uniform Model {
 } model;
 
 in vec3 vVertColor;
+in float vVertBloom;
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 bloomColor;
@@ -325,8 +336,9 @@ layout(location = 2) out vec4 outlineOut;
 
 void main() {
   vec4 c = vec4(model.color.rgb * vVertColor, model.color.a);
-  fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
-  bloomColor = vec4(c.rgb * model.bloom, c.a);
+  float bloomVal = max(vVertBloom, model.bloom);
+  fragColor = vec4(mix(c.rgb, vec3(1.0), bloomVal * model.bloomWhiten), c.a);
+  bloomColor = vec4(c.rgb * bloomVal, c.a);
   outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
@@ -360,11 +372,13 @@ layout(std140) uniform Lighting {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec3 color;
-layout(location = 3) in vec2 uv;
+layout(location = 3) in float bloom;
+layout(location = 4) in vec2 uv;
 
 out vec3 vWorldNorm;
 out vec3 vVertColor;
 out vec3 vWorldPos;
+out float vVertBloom;
 out vec2 vUV;
 
 void main() {
@@ -372,6 +386,7 @@ void main() {
   gl_Position = camera.projection * camera.view * worldPos;
   vWorldNorm = (model.world * vec4(normal, 0.0)).xyz;
   vVertColor = color;
+  vVertBloom = bloom;
   vUV = uv;
   vWorldPos = worldPos.xyz;
 }
@@ -410,6 +425,7 @@ uniform sampler2D uAoMap;
 in vec3 vWorldNorm;
 in vec3 vVertColor;
 in vec3 vWorldPos;
+in float vVertBloom;
 in vec2 vUV;
 
 out vec4 fragColor;
@@ -517,6 +533,7 @@ uniform sampler2D uAoMap;
 in vec3 vWorldNorm;
 in vec3 vVertColor;
 in vec3 vWorldPos;
+in float vVertBloom;
 in vec2 vUV;
 
 layout(location = 0) out vec4 fragColor;
@@ -590,8 +607,9 @@ void main() {
   vec3 ambient = lighting.ambientColor.rgb * ao;
   vec3 finalColor = model.color.rgb * vVertColor * (diffuse + ambient);
   vec4 c = vec4(finalColor, model.color.a);
-  fragColor = vec4(mix(c.rgb, vec3(1.0), model.bloomWhiten), c.a);
-  bloomColor = vec4(c.rgb * model.bloom, c.a);
+  float bloomVal = max(vVertBloom, model.bloom);
+  fragColor = vec4(mix(c.rgb, vec3(1.0), bloomVal * model.bloomWhiten), c.a);
+  bloomColor = vec4(c.rgb * bloomVal, c.a);
   outlineOut = vec4(model.outline, model.outlineScale, 0.0, 1.0);
 }
 `
@@ -629,12 +647,14 @@ layout(std140) uniform JointMatrices {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec3 color;
-layout(location = 3) in uvec4 joints;
-layout(location = 4) in vec4 weights;
+layout(location = 3) in float bloom;
+layout(location = 4) in uvec4 joints;
+layout(location = 5) in vec4 weights;
 
 out vec3 vWorldNorm;
 out vec3 vVertColor;
 out vec3 vWorldPos;
+out float vVertBloom;
 
 void main() {
   mat4 skinMat =
@@ -647,6 +667,7 @@ void main() {
   gl_Position = camera.projection * camera.view * worldPos;
   vWorldNorm = (model.world * skinMat * vec4(normal, 0.0)).xyz;
   vVertColor = color;
+  vVertBloom = bloom;
   vWorldPos = worldPos.xyz;
 }
 `
@@ -700,8 +721,8 @@ layout(std140) uniform JointMatrices {
 };
 
 layout(location = 0) in vec3 position;
-layout(location = 3) in uvec4 joints;
-layout(location = 4) in vec4 weights;
+layout(location = 4) in uvec4 joints;
+layout(location = 5) in vec4 weights;
 
 void main() {
   mat4 skinMat =
