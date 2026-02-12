@@ -16,7 +16,7 @@ import type { SkinInstance } from './skin.ts'
 const MODEL_SLOT_SIZE = 256 // minUniformBufferOffsetAlignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 128 mat4 * 64 bytes = 8192 (already 256-aligned)
-const MAX_SKINNED_ENTITIES = 64
+const MAX_SKINNED_ENTITIES = 256
 const SHADOW_MAP_SIZE = 2048
 const MSAA_SAMPLES = 4
 

@@ -165,16 +165,18 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const megaxe = glbMeshes.find(m => m.name === 'megaxe')
   let axeMesh: Mesh | undefined
   let axeBloomMesh: Mesh | undefined
+  let axeBaseGeo: number | undefined
+  let axeGlowGeo: number | undefined
   if (megaxe) {
     if (megaxe.materialIndices) {
       // Split: non-bloom materials (0,1) and bloom material (2)
       const base = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx !== 2)
       const glow = splitByMaterial(megaxe.vertices, megaxe.indices, megaxe.materialIndices, idx => idx === 2)
       if (base) {
-        const geo = scene.registerGeometry(base.vertices, base.indices)
+        axeBaseGeo = scene.registerGeometry(base.vertices, base.indices)
         axeMesh = scene.add(
           new Mesh({
-            geometry: geo,
+            geometry: axeBaseGeo,
             position: [0, 0.3, 0],
             rotation: [0, 0, Math.PI],
             scale: megaxe.scale,
@@ -184,10 +186,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         )
       }
       if (glow) {
-        const geo = scene.registerGeometry(glow.vertices, glow.indices)
+        axeGlowGeo = scene.registerGeometry(glow.vertices, glow.indices)
         axeBloomMesh = scene.add(
           new Mesh({
-            geometry: geo,
+            geometry: axeGlowGeo,
             position: [0, 0.3, 0],
             rotation: [0, 0, Math.PI],
             scale: megaxe.scale,
@@ -198,10 +200,10 @@ export async function startDemo(canvas: HTMLCanvasElement) {
         )
       }
     } else {
-      const geo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
+      axeBaseGeo = scene.registerGeometry(megaxe.vertices, megaxe.indices)
       axeMesh = scene.add(
         new Mesh({
-          geometry: geo,
+          geometry: axeBaseGeo,
           position: [0, 0.3, 0],
           rotation: [0, 0, Math.PI],
           scale: megaxe.scale,
@@ -326,6 +328,93 @@ export async function startDemo(canvas: HTMLCanvasElement) {
     // Attach megaxe to player's right hand bone
     if (axeMesh) scene.attachToBone(axeMesh, player, 'Hand.R')
     if (axeBloomMesh) scene.attachToBone(axeBloomMesh, player, 'Hand.R')
+
+    // ── NPC grid ──────────────────────────────────────────────────────
+    if (edenWorldMesh) {
+      const NPC_COLS = 15
+      const NPC_ROWS = 14
+      const ANIM_CYCLE_LENGTH = ANIM_INTERVAL * animIndices.length // 4.0s full cycle
+      const npcRayHit = createRaycastHit()
+      const npcEdenFilter = [edenWorldMesh] as readonly Mesh[]
+      let npcCount = 0
+
+      for (let row = 0; row < NPC_ROWS; row++) {
+        for (let col = 0; col < NPC_COLS; col++) {
+          const x = (col / (NPC_COLS - 1)) * 150
+          const y = (row / (NPC_ROWS - 1)) * 150
+
+          // Check for ground at this position
+          const hit = scene.raycast(x, y, 200, 0, 0, -1, npcRayHit, npcEdenFilter)
+          if (!hit) continue
+
+          const groundZ = npcRayHit.pointZ
+          const skinInstId = scene.skinInstances.length
+
+          // Stagger animation: spread each NPC evenly across the full cycle
+          const timeOffset = (npcCount / (NPC_COLS * NPC_ROWS)) * ANIM_CYCLE_LENGTH
+          const initialAnimIdx = Math.floor(timeOffset / ANIM_INTERVAL) % animIndices.length
+
+          const npcSkinInst = createSkinInstance(skeleton, animIndices[initialAnimIdx]!)
+          updateSkinInstance(npcSkinInst, playerResult.animations, 0)
+          scene.skinInstances.push(npcSkinInst)
+
+          // Body
+          const npcBody = scene.add(
+            new Mesh({
+              geometry: geo,
+              position: [x, y, groundZ],
+              scale: bodyMesh.scale,
+              color: [1, 1, 1],
+              skinned: true,
+              skinInstanceId: skinInstId,
+            }),
+          )
+
+          // Axe (base)
+          if (axeBaseGeo !== undefined) {
+            const npcAxe = scene.add(
+              new Mesh({
+                geometry: axeBaseGeo,
+                position: [0, 0.3, 0],
+                rotation: [0, 0, Math.PI],
+                scale: megaxe!.scale,
+                color: [1, 1, 1],
+              }),
+            )
+            scene.attachToBone(npcAxe, npcBody, 'Hand.R')
+          }
+
+          // Axe (bloom)
+          if (axeGlowGeo !== undefined) {
+            const npcAxeGlow = scene.add(
+              new Mesh({
+                geometry: axeGlowGeo,
+                position: [0, 0.3, 0],
+                rotation: [0, 0, Math.PI],
+                scale: megaxe!.scale,
+                color: [1, 1, 1],
+                bloom: 1.0,
+              }),
+            )
+            scene.attachToBone(npcAxeGlow, npcBody, 'Hand.R')
+          }
+
+          // Animation cycle callback (staggered timer)
+          let npcAnimIndex = initialAnimIdx
+          let npcAnimTimer = timeOffset % ANIM_INTERVAL
+          animCycleCallbacks.push((dt: number) => {
+            npcAnimTimer += dt
+            if (npcAnimTimer >= ANIM_INTERVAL) {
+              npcAnimTimer -= ANIM_INTERVAL
+              npcAnimIndex = (npcAnimIndex + 1) % animIndices.length
+              transitionTo(npcSkinInst, animIndices[npcAnimIndex]!, BLEND_DURATION)
+            }
+          })
+
+          npcCount++
+        }
+      }
+    }
   }
 
   // ── Transparent cubes ─────────────────────────────────────────────────

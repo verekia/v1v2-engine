@@ -26,7 +26,7 @@ import type { IRenderer, RenderScene } from './renderer.ts'
 const MODEL_SLOT_SIZE = 256 // match WebGPU alignment
 const MAX_JOINTS = 128
 const JOINT_SLOT_SIZE = MAX_JOINTS * 64 // 8192 bytes per slot
-const MAX_SKINNED_ENTITIES = 64
+const MAX_SKINNED_ENTITIES = 256
 const SHADOW_MAP_SIZE = 2048
 const BLOOM_MIPS = 5
 
