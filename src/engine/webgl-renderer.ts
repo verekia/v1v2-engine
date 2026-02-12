@@ -178,7 +178,12 @@ export class WebGLRenderer implements IRenderer {
   private _tpOrder: number[] = []
   private _tpDist: Float32Array
 
-  constructor(gl: WebGL2RenderingContext, _canvas: HTMLCanvasElement, maxEntities = 1000, maxSkinnedEntities = DEFAULT_MAX_SKINNED_ENTITIES) {
+  constructor(
+    gl: WebGL2RenderingContext,
+    _canvas: HTMLCanvasElement,
+    maxEntities = 1000,
+    maxSkinnedEntities = DEFAULT_MAX_SKINNED_ENTITIES,
+  ) {
     this.gl = gl
     this.maxEntities = maxEntities
     this.maxSkinnedEntities = maxSkinnedEntities
