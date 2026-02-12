@@ -86,7 +86,7 @@ export async function startDemo(canvas: HTMLCanvasElement) {
   const webgpuAvailable = !!navigator.gpu
   const savedBackend = localStorage.getItem('renderer-backend') as BackendType | null
   let currentCanvas = canvas
-  const scene = await createScene(currentCanvas, { maxEntities: 1000, backend: savedBackend ?? undefined })
+  const scene = await createScene(currentCanvas, { maxEntities: 10000, backend: savedBackend ?? undefined })
 
   // ── Input (demo-only) ────────────────────────────────────────────────
   const keys = new Set<string>()
@@ -331,8 +331,8 @@ export async function startDemo(canvas: HTMLCanvasElement) {
 
     // ── NPC grid ──────────────────────────────────────────────────────
     if (edenWorldMesh) {
-      const NPC_COLS = 15
-      const NPC_ROWS = 14
+      const NPC_COLS = 25
+      const NPC_ROWS = 25
       const ANIM_CYCLE_LENGTH = ANIM_INTERVAL * animIndices.length // 4.0s full cycle
       const npcRayHit = createRaycastHit()
       const npcEdenFilter = [edenWorldMesh] as readonly Mesh[]

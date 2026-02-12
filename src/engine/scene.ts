@@ -210,6 +210,7 @@ export class Scene {
   private _renderer: IRenderer
   private _canvas: HTMLCanvasElement
   private _maxEntities: number
+  private _maxSkinnedEntities: number | undefined
   private _geoRegs = new Map<number, GeoReg>()
   private _texRegs = new Map<number, TexReg>()
   private _bvhCache = new Map<number, BVH>()
@@ -256,10 +257,11 @@ export class Scene {
   private _rayWorldNormal = new Float32Array(3)
 
   /** @internal — use createScene() instead */
-  constructor(renderer: IRenderer, canvas: HTMLCanvasElement, maxEntities: number) {
+  constructor(renderer: IRenderer, canvas: HTMLCanvasElement, maxEntities: number, maxSkinnedEntities?: number) {
     this._renderer = renderer
     this._canvas = canvas
     this._maxEntities = maxEntities
+    this._maxSkinnedEntities = maxSkinnedEntities
     this._positions = new Float32Array(maxEntities * 3)
     this._scales = new Float32Array(maxEntities * 3)
     this._worldMatrices = new Float32Array(maxEntities * 16)
@@ -489,7 +491,7 @@ export class Scene {
 
   async switchBackend(canvas: HTMLCanvasElement, type: BackendType): Promise<void> {
     this._renderer.destroy()
-    this._renderer = await createRendererInternal(canvas, this._maxEntities, type)
+    this._renderer = await createRendererInternal(canvas, this._maxEntities, type, this._maxSkinnedEntities)
     this._canvas = canvas
 
     // Re-register all geometries on the new renderer
@@ -637,9 +639,9 @@ export class Scene {
 
 export async function createScene(
   canvas: HTMLCanvasElement,
-  opts?: { maxEntities?: number; backend?: BackendType },
+  opts?: { maxEntities?: number; maxSkinnedEntities?: number; backend?: BackendType },
 ): Promise<Scene> {
   const maxEntities = opts?.maxEntities ?? 10_000
-  const renderer = await createRendererInternal(canvas, maxEntities, opts?.backend)
-  return new Scene(renderer, canvas, maxEntities)
+  const renderer = await createRendererInternal(canvas, maxEntities, opts?.backend, opts?.maxSkinnedEntities)
+  return new Scene(renderer, canvas, maxEntities, opts?.maxSkinnedEntities)
 }
