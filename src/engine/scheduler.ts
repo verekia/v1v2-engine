@@ -130,7 +130,7 @@ export class Scheduler {
 
       // Per-callback FPS throttle with corrected dt
       if (entry.fpsInterval > 0) {
-        if (entry.lastRunTime > 0 && now - entry.lastRunTime < entry.fpsInterval) continue
+        if (entry.lastRunTime > 0 && now - entry.lastRunTime < entry.fpsInterval - 1) continue
         if (entry.lastRunTime > 0) {
           state.dt = Math.min((now - entry.lastRunTime) / 1000, 0.1)
         }
