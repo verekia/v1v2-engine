@@ -1,5 +1,7 @@
 export { createScene, Scene, Mesh, Camera, createRaycastHit } from './scene.ts'
 export type { MeshOptions, ShadowConfig, BloomConfig, OutlineConfig, RaycastHit } from './scene.ts'
+export { Scheduler } from './scheduler.ts'
+export type { SchedulerState, SchedulerCallbackOptions, SchedulerCallback } from './scheduler.ts'
 export { buildBVH, raycastBVH } from './bvh.ts'
 export type { BVH } from './bvh.ts'
 export { HtmlOverlay, HtmlElement } from './html-overlay.ts'
